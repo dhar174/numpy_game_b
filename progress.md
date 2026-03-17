@@ -15,3 +15,8 @@ Original prompt: Implement the "NumPy Nebula: Reboot the Colony Ship" web-based 
 - Added GitHub Actions workflows for regression CI and GitHub Pages deployment.
 - Re-ran the browser verification suite and confirmed all seven sectors can be solved end to end, including reset behavior and inspector sync.
 - TODO: Add more authored late-game variants or alternate difficulty modes if we want a longer curriculum beyond the seven-sector campaign.
+
+## 2026-03-18
+- Added a new "Nebula Mode" variant for each sector that introduces additional constraints or twists to challenge players who have completed the main campaign.
+- Implemented a new "Ship Log" feature that tracks player progress, key decisions, and learning milestones across the campaign, providing a personalized recap at the end of each sector.
+- Enhanced the UI with new animations and visual effects to make the gameplay more engaging and rewarding, especially when players successfully complete a sector or unlock new areas of the ship.
