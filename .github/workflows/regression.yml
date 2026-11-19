@@ -16,6 +16,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      - name: Set container home ownership for Firefox
+        run: |
+          chown "$(id -u):$(id -g)" /github/home
+          test "$(stat -c %u /github/home)" = "$(id -u)"
       - run: npm run typecheck
       - run: npm run test:regression
         env:
