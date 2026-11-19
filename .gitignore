@@ -3,3 +3,7 @@ playwright-report/
 test-results/
 output/
 __pycache__/
+dist/
+public/runtime/
+.superdesign/
+.playwright-mcp/

@@ -20,3 +20,11 @@ Original prompt: Implement the "NumPy Nebula: Reboot the Colony Ship" web-based 
 - Added a new "Nebula Mode" variant for each sector that introduces additional constraints or twists to challenge players who have completed the main campaign.
 - Implemented a new "Ship Log" feature that tracks player progress, key decisions, and learning milestones across the campaign, providing a personalized recap at the end of each sector.
 - Enhanced the UI with new animations and visual effects to make the gameplay more engaging and rewarding, especially when players successfully complete a sector or unlock new areas of the ship.
+
+## 2026-11-19 — NumPy Nebula 2.0
+
+- Built the approved retro pixel interface and seven-room cutaway. Boot Bay playtesting covered a failed run, a repair with visible mobile feedback, array inspection, and restoring the draft and progress after reload.
+- Added 15 campaign checkpoints, seven Nebula challenges, the Free Lab datasets, a Ship Log with replay, and the final rescue recap. The March 18 entries above described planned features. They are now available in the app.
+- Moved execution to a same-origin Pyodide worker with cancellation, a deadline, a retry flow, and bounded output. Exercises validate against two fixtures, with memory and exact slice checks where applicable.
+- Added a versioned local save and a responsive editor and inspector. The release regression now exercises the production build on Chromium, Firefox, and WebKit under a Pages-style subpath.
+- In three cold Chromium trials at 4× CPU slowdown, 25 Mbps and 50 ms latency, the median interactive shell was 0.709 s and NumPy readiness was 8.071 s against targets of 1.5 s and 8 s. During a 550 ms Python computation, the settings dialog opened and the test recorded zero main-thread long tasks.

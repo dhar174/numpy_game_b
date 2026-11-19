@@ -2,29 +2,36 @@ name: Regression
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
 
 jobs:
   regression:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
-
-      - name: Run browser regression
-        run: npm run test:regression
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium firefox webkit
+      - run: npm run typecheck
+      - run: npm run test:regression
+        env:
+          NEBULA_BROWSER: all
+          NEBULA_SHOTS: output/regression
+      - name: Preserve verified static game
+        uses: actions/upload-artifact@v4
+        with:
+          name: numpy-nebula-static-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve playtest screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: numpy-nebula-playtest
+          path: output/regression/
+          if-no-files-found: ignore
