@@ -20,6 +20,7 @@ npm run typecheck
 npx playwright install chromium firefox webkit
 $env:NEBULA_BROWSER = 'all'
 npm run test:regression
+node scripts/boot-playtest.mjs --dev
 node scripts/performance-check.mjs
 ```
 

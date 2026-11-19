@@ -21,6 +21,8 @@ jobs:
         env:
           NEBULA_BROWSER: all
           NEBULA_SHOTS: output/regression
+      - name: Smoke-test the development server
+        run: node scripts/boot-playtest.mjs --dev
       - name: Preserve verified static game
         uses: actions/upload-artifact@v4
         with:

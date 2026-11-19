@@ -4,7 +4,16 @@ import {resolve} from 'node:path';
 import {chromium} from 'playwright';
 import {serveBuild} from './static-server.mjs';
 
-const site = await serveBuild();
+const development = process.argv.includes('--dev');
+let site;
+if (development) {
+  const {createServer} = await import('vite');
+  const vite = await createServer({server: {host: '127.0.0.1', port: 0}, logLevel: 'warn'});
+  await vite.listen();
+  site = {url: 'http://127.0.0.1:' + vite.httpServer.address().port + '/', close: () => vite.close()};
+} else {
+  site = await serveBuild();
+}
 const browser = await chromium.launch();
 const page = await browser.newPage({viewport: {width: 390, height: 844}, hasTouch: true, isMobile: true});
 const errors = [];
@@ -13,7 +22,7 @@ page.on('console', message => { if (message.type() === 'error') errors.push(mess
 const editor = page.getByRole('textbox', {name: 'NumPy mission code editor'});
 const summary = page.locator('#run-summary');
 async function capture(name) {
-  if (!process.env.NEBULA_SHOTS) return;
+  if (development || !process.env.NEBULA_SHOTS) return;
   await mkdir(process.env.NEBULA_SHOTS, {recursive: true});
   const path = resolve(process.env.NEBULA_SHOTS, name + '.png');
   const image = await page.screenshot({path});
@@ -47,7 +56,7 @@ try {
   const current = await editor.evaluate(node => node instanceof HTMLTextAreaElement ? node.value : node.textContent);
   assert.ok(current.includes('np.zeros(power_shape'));
   assert.deepEqual(errors, []);
-  console.log('Boot Bay slice passed: touch layout, syntax error, failed check, successful repair, inspector, draft and checkpoint reload.');
+  console.log((development ? 'Vite development' : 'Production') + ' Boot Bay slice passed: touch layout, syntax error, failed check, successful repair, inspector, draft and checkpoint reload.');
 } finally {
   await browser.close();
   await site.close();

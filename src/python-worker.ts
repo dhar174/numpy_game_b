@@ -29,9 +29,11 @@ async function bootRuntime(indexURL: string) {
       const cached = await pending;
       if (cached?.ok && cached.body) {
         if (url === wheelUrl) return cached;
-        return new Response(cached.body.pipeThrough(new DecompressionStream('gzip')), {
-          headers: {'Content-Type': 'application/wasm'},
-        });
+        // Vite may mark this file as encoded Wasm, which fetch already decodes.
+        const embeddedEncoding = cached.headers.get('content-type')?.split(';')[0] === 'application/wasm'
+          && cached.headers.has('content-encoding');
+        const wasm = embeddedEncoding ? cached.body : cached.body.pipeThrough(new DecompressionStream('gzip'));
+        return new Response(wasm, {headers: {'Content-Type': 'application/wasm'}});
       }
     }
     return request(input, options);
