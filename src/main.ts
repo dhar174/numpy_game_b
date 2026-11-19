@@ -20,7 +20,7 @@ const button = (id: string) => get<HTMLButtonElement>(id);
 const details = (id: string) => get<HTMLDetailsElement>(id);
 const dialog = (id: string) => get<HTMLDialogElement>(id);
 
-const game = new Campaign();
+const game = new Campaign(syncStorage);
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
 const ship = new ShipView(get<HTMLCanvasElement>('ship-canvas'));
 const runButton = button('run-btn');
@@ -317,10 +317,7 @@ function renderCheckpoint() {
     if (checkpoint === current) control.setAttribute('aria-current', 'step');
     control.disabled = !game.checkpointUnlocked(checkpoint);
     control.addEventListener('click', () => {
-      if (!game.checkpointUnlocked(checkpoint)) return;
-      game.save.campaignId = checkpoint.id;
-      game.persist();
-      openWorkspace(true);
+      if (game.selectCheckpoint(checkpoint)) openWorkspace(true);
     });
     return control;
   }));
@@ -359,8 +356,7 @@ function openWorkspace(focus = false) {
   hintCount = 0;
   if (engine.status !== 'failed') engineNote = '';
   if (focus && !game.save.settings.oriented) {
-    game.save.settings.oriented = true;
-    game.persist();
+    game.setSetting('oriented', true);
   }
   editor.show(game.draft, game.save.settings.plain);
   inspector.setOutputs([]);
@@ -472,8 +468,7 @@ get<HTMLFormElement>('prediction-form').addEventListener('submit', event => {
 });
 details('transmission').addEventListener('toggle', () => {
   if (!details('transmission').open && !game.save.settings.oriented) {
-    game.save.settings.oriented = true;
-    game.persist();
+    game.setSetting('oriented', true);
     syncStorage();
   }
 });
@@ -520,30 +515,26 @@ button('settings-button').addEventListener('click', () => {
   dialog('settings-dialog').showModal();
 });
 get<HTMLInputElement>('plain-setting').addEventListener('change', event => {
-  game.save.settings.plain = (event.target as HTMLInputElement).checked;
-  game.persist();
+  game.setSetting('plain', (event.target as HTMLInputElement).checked);
   editor.show(editor.source, game.save.settings.plain);
   if (engine.status === 'ready') editor.enhance();
   syncStorage();
 });
 get<HTMLInputElement>('sound-setting').addEventListener('change', event => {
-  game.save.settings.sound = (event.target as HTMLInputElement).checked;
+  game.setSetting('sound', (event.target as HTMLInputElement).checked);
   repairSound(game.save.settings.sound, false);
-  game.persist();
   syncStorage();
 });
 get<HTMLInputElement>('ambience-setting').addEventListener('change', event => {
-  game.save.settings.ambience = (event.target as HTMLInputElement).checked;
+  game.setSetting('ambience', (event.target as HTMLInputElement).checked);
   toggleAmbience(game.save.settings.ambience);
-  game.persist();
   syncStorage();
 });
 document.addEventListener('pointerdown', () => {
   if (game.save.settings.ambience) toggleAmbience(true);
 }, {once: true});
 get<HTMLSelectElement>('motion-setting').addEventListener('change', event => {
-  game.save.settings.motion = (event.target as HTMLSelectElement).value as Motion;
-  game.persist();
+  game.setSetting('motion', (event.target as HTMLSelectElement).value as Motion);
   refreshNavigation();
 });
 motion.addEventListener('change', refreshNavigation);

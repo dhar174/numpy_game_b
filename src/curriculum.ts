@@ -29,6 +29,9 @@ const prediction = (
 ) => ({ question, options, answer, explanation });
 const check = (label: string, expr: string, hint: string) => ({ label, expr, hint });
 const checkpoint = (data: Checkpoint): Checkpoint => data;
+const centeredSignal = "(__initial['signal'] - __initial['signal'].mean(axis=0, keepdims=True))";
+const trafficTotals = "__initial['counts'].sum(axis=1, keepdims=True)";
+const nonemptyTraffic = "(__initial['counts'].sum(axis=1) != 0)";
 
 const bootBay: Checkpoint[] = [
   checkpoint({
@@ -322,8 +325,12 @@ export const sectors: Sector[] = [
       prediction: prediction("For signal.shape == (4, 2), what shape does mean(axis=0, keepdims=True) return?", ["(1, 2)", "(4, 1)", "(2,)"], 0, "keepdims leaves the reduced row axis with length one."),
       checks: [
         check("Column mean keeps a single row axis", "column_mean.shape == (1, __initial['signal'].shape[1]) and bool(np.allclose(column_mean, __initial['signal'].mean(axis=0, keepdims=True)))", "Reduce rows with axis=0 and keep the dimension."),
-        check("Centered data has zero mean in each column", "centered.shape == __initial['signal'].shape and bool(np.allclose(centered.mean(axis=0), 0))", "Subtract the broadcast column means."),
-        check("Column energy sums squared deviations down each lane", "bool(np.allclose(column_energy, np.sum(centered ** 2, axis=0)))", "The lane totals reduce the row axis."),
+        check("Centered values equal the readings minus their column means",
+          `np.shape(centered) == __initial['signal'].shape and np.allclose(centered, ${centeredSignal})`,
+          "Subtract the broadcast column means from the original readings."),
+        check("Column energy sums squared deviations down each lane",
+          `np.shape(column_energy) == (__initial['signal'].shape[1],) and np.allclose(column_energy, np.sum(${centeredSignal} ** 2, axis=0))`,
+          "Square the centered readings and sum along the row axis."),
       ],
     }),
   },
@@ -463,7 +470,9 @@ export const sectors: Sector[] = [
         checks: [
           check("Merged modules sit side by side", "bool(np.array_equal(merged, np.concatenate((__initial['left'], __initial['right']), axis=1)))", "Join along the column axis."),
           check("Stacked modules use a new axis", "bool(np.array_equal(stacked, np.stack((__initial['left'], __initial['right'])))) and stacked.shape == (2,) + __initial['left'].shape", "Stack adds an axis."),
-          check("Three split sections recombine to the manifest", "len(sections) == 3 and bool(np.array_equal(np.concatenate(sections), __initial['manifest']))", "Split into three equal pieces and preserve order."),
+          check("Three equal sections preserve the manifest in order",
+            "len(sections) == 3 and all(np.array_equal(part, expected) for part, expected in zip(sections, np.split(__initial['manifest'], 3)))",
+            "Split into three equal pieces and preserve order."),
         ],
       }),
       checkpoint({
@@ -596,9 +605,13 @@ export const sectors: Sector[] = [
       ],
       prediction: prediction("If counts has shape (4, 2), what shape does sum(axis=1, keepdims=True) have?", ["(4, 1)", "(1, 2)", "(4,)"], 0, "The reduced column axis remains as length one for row-wise broadcasting."),
       checks: [
-        check("Row totals keep a column dimension", "row_totals.shape == (__initial['counts'].shape[0], 1) and bool(np.array_equal(row_totals, __initial['counts'].sum(axis=1, keepdims=True)))", "Keep the reduced axis."),
-        check("Nonempty rows become proportions summing to one", "bool(np.allclose(shares[row_totals[:, 0] != 0].sum(axis=1), 1))", "Normalize each nonzero row by its total."),
-        check("Empty rows stay zero and all shares are finite", "bool(np.all(shares[row_totals[:, 0] == 0] == 0)) and bool(np.all(np.isfinite(shares)))", "Guard division where the total is zero."),
+        check("Row totals keep a column dimension", `np.array_equal(row_totals, ${trafficTotals})`, "Keep the reduced axis."),
+        check("Each share is its traffic count divided by its row total",
+          `np.shape(shares) == __initial['counts'].shape and np.allclose(np.asarray(shares)[${nonemptyTraffic}], __initial['counts'][${nonemptyTraffic}] / (${trafficTotals})[${nonemptyTraffic}])`,
+          "Normalize each count by the total of its own nonzero row."),
+        check("Empty rows stay zero and all shares are finite",
+          `np.all(np.asarray(shares)[~${nonemptyTraffic}] == 0) and np.all(np.isfinite(shares))`,
+          "Guard division where the total is zero."),
       ],
     }),
   },

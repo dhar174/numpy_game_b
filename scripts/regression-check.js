@@ -13,6 +13,20 @@ const shotDir = process.env.NEBULA_SHOTS;
 const campaign = sectors.flatMap(sector => sector.campaign);
 const challenges = sectors.map(sector => sector.nebula);
 const catalog = [...campaign, ...challenges];
+const nearMisses = {
+  'cargo-join-split': solutions['cargo-join-split'].replace(
+    'sections = np.split(manifest, 3)',
+    'sections = [manifest[:1], manifest[1:2], manifest[2:]]',
+  ),
+  'nebula-column-normalizer': solutions['nebula-column-normalizer'].replace(
+    'centered = signal - column_mean',
+    'centered = np.zeros_like(signal)',
+  ),
+  'nebula-zero-safe-shares': [
+    'row_totals = counts.sum(axis=1, keepdims=True)',
+    'shares = np.where(row_totals != 0, 1.0 / counts.shape[1], 0.0) * np.ones_like(counts)',
+  ].join('\n'),
+};
 assert.deepEqual(sectors.map(sector => sector.campaign.length), [2, 2, 2, 2, 3, 3, 1]);
 assert.equal(labDatasets.length, 4);
 assert.equal(new Set(catalog.map(entry => entry.id)).size, 22);
@@ -64,6 +78,13 @@ async function inspect(page, name) {
 async function clear(page, checkpoint) {
   const before = await getState(page);
   assert.equal(before.checkpoint.id, checkpoint.id);
+  if (Object.hasOwn(nearMisses, checkpoint.id)) {
+    const rejected = await run(page, nearMisses[checkpoint.id]);
+    assert.equal(rejected.runStatus, 'stale', checkpoint.id + ': expected review feedback for a wrong result');
+    assert.equal(rejected.checkpoint.complete, false, checkpoint.id + ': near miss earned a clear');
+    assert.ok(rejected.progress.checksPassing > 0 &&
+      rejected.progress.checksPassing < rejected.progress.totalChecks, checkpoint.id + ': near miss should pass some checks');
+  }
   const after = await run(page, solutions[checkpoint.id]);
   assert.equal(after.runStatus, 'success', checkpoint.id + ': ' + after.output.summary);
   assert.ok(after.checkpoint.complete, checkpoint.id + ': no clear recorded');
@@ -97,7 +118,8 @@ async function play(name) {
   assert.ok(browsers[name], 'Unknown NEBULA_BROWSER ' + name);
   const browser = await browsers[name].launch();
   try {
-    const page = await browser.newPage({viewport: {width: 1440, height: 900}, reducedMotion: 'reduce'});
+    const context = await browser.newContext({viewport: {width: 1440, height: 900}, reducedMotion: 'reduce'});
+    const page = await context.newPage();
     const errors = listen(page);
     const external = [];
     page.on('request', request => {
@@ -150,6 +172,9 @@ async function play(name) {
       await page.getByText('Last run shown. Your draft has changed.', {exact: true}).waitFor();
       assert.equal((await getState(page)).checkpoint.complete, false);
     }
+    const peer = await context.newPage();
+    await peer.goto(site.url);
+    await ready(peer);
     const equivalent = await run(page, 'power_core = np.full(power_shape, 0, dtype=power_dtype)');
     assert.equal(equivalent.checkpoint.complete, true);
     const core = await inspect(page, 'power_core');
@@ -168,6 +193,28 @@ async function play(name) {
     assert.match(await draftText(page), /saved edit/);
     await next(page);
     await clear(page, campaign[1]);
+    const peerDraft = '# edited from a second tab opened before the clear';
+    await editor(peer).fill(peerDraft);
+    await peer.waitForFunction(draft => {
+      const save = JSON.parse(localStorage.getItem('numpy-nebula-save'));
+      return save?.drafts['boot-power-core'] === draft;
+    }, peerDraft);
+    await peer.locator('#reset-btn').click();
+    await peer.getByRole('dialog', {name:'Reset this draft?'}).getByRole('button', {name:'Reset draft'}).click();
+    await peer.waitForFunction(() => {
+      const save = JSON.parse(localStorage.getItem('numpy-nebula-save'));
+      return save && !Object.hasOwn(save.drafts, 'boot-power-core');
+    });
+    await peer.close();
+    await page.reload();
+    await ready(page);
+    const afterPeer = await getState(page);
+    assert.equal(afterPeer.checkpoint.id, campaign[1].id, 'Peer draft operations must preserve the active checkpoint');
+    assert.equal(afterPeer.progress.labUnlocked, true, 'Peer draft operations must preserve both Boot Bay clears');
+    const calibrationDraft = await page.evaluate(id =>
+      JSON.parse(localStorage.getItem('numpy-nebula-save')).drafts[id], campaign[1].id);
+    assert.equal(calibrationDraft, solutions[campaign[1].id], 'Peer reset must preserve the other workspace draft');
+    await run(page, solutions[campaign[1].id]);
     const vector = await inspect(page, 'course_line');
     assert.equal(vector.cells[0][0].index, '[0]');
     assert.equal((await getState(page)).progress.labUnlocked, true);

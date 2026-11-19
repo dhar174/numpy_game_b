@@ -31,52 +31,90 @@ function ownRecord(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown> : {};
 }
 
+function hasCleared(save: Save, checkpoints: Checkpoint[]) {
+  return checkpoints.every(checkpoint => Object.hasOwn(save.completed, checkpoint.id));
+}
+
+function checkpointUnlocked(save: Save, checkpoint: Checkpoint) {
+  const index = campaign.indexOf(checkpoint);
+  return index >= 0 && hasCleared(save, campaign.slice(0, index));
+}
+
+function readSave(): Save {
+  const legacy = localStorage.getItem('numpy-nebula-briefing-dismissed') === 'true';
+  const encoded = localStorage.getItem(KEY);
+  const save = fresh(legacy);
+  if (!encoded) return save;
+  let stored: Record<string, unknown>;
+  try {
+    stored = ownRecord(JSON.parse(encoded));
+  } catch {
+    return save;
+  }
+  if (stored.version !== 2) return save;
+  const {plain, sound, ambience, motion, oriented} = ownRecord(stored.settings);
+  save.settings = {
+    plain: plain === true, sound: sound === true, ambience: ambience === true,
+    motion: motion === 'reduced' || motion === 'full' ? motion : 'system',
+    oriented: typeof oriented === 'boolean' ? oriented : legacy,
+  };
+  save.completed = Object.fromEntries(Object.entries(ownRecord(stored.completed))
+    .filter(([id, time]) => validIds.has(id) && typeof time === 'number' && Number.isFinite(time))) as Record<string, number>;
+  save.drafts = Object.fromEntries(Object.entries(ownRecord(stored.drafts))
+    .filter(([id, source]) => (validIds.has(id) || (id.startsWith('lab:') && labIds.has(id.slice(4))))
+      && typeof source === 'string')) as Record<string, string>;
+  const checkpoint = campaign.find(entry => entry.id === stored.campaignId);
+  if (checkpoint && checkpointUnlocked(save, checkpoint)) save.campaignId = checkpoint.id;
+  const nebulaUnlocked = hasCleared(save, campaign);
+  if (nebulaUnlocked && nebula.some(entry => entry.id === stored.nebulaId)) {
+    save.nebulaId = String(stored.nebulaId);
+  }
+  if (typeof stored.labId === 'string' && labIds.has(stored.labId)) save.labId = stored.labId;
+  if (stored.mode === 'nebula' && nebulaUnlocked) save.mode = 'nebula';
+  if (stored.mode === 'lab' && hasCleared(save, sectors[0].campaign)) save.mode = 'lab';
+  return save;
+}
+
 export class Campaign {
   save = fresh();
   persistence = true;
 
-  constructor() {
+  constructor(private readonly onPersistenceChange: () => void) {
     try {
-      const legacy = localStorage.getItem('numpy-nebula-briefing-dismissed') === 'true';
-      const encoded = localStorage.getItem(KEY);
-      this.save = fresh(legacy);
-      if (!encoded) return;
-      const stored = ownRecord(JSON.parse(encoded));
-      if (stored.version !== 2) return;
-      const settings = ownRecord(stored.settings);
-      const {plain, sound, ambience, motion, oriented} = settings;
-      this.save.settings = {
-        plain: plain === true, sound: sound === true, ambience: ambience === true,
-        motion: motion === 'reduced' || motion === 'full' ? motion : 'system',
-        oriented: typeof oriented === 'boolean' ? oriented : legacy,
-      };
-      this.save.completed = Object.fromEntries(Object.entries(ownRecord(stored.completed))
-        .filter(([id, time]) => validIds.has(id) && typeof time === 'number' && Number.isFinite(time))) as Record<string, number>;
-      this.save.drafts = Object.fromEntries(Object.entries(ownRecord(stored.drafts))
-        .filter(([id, source]) => (validIds.has(id) || (id.startsWith('lab:') && labIds.has(id.slice(4))))
-          && typeof source === 'string')) as Record<string, string>;
-      if (typeof stored.campaignId === 'string') {
-        const checkpoint = campaign.find(entry => entry.id === stored.campaignId);
-        if (checkpoint && this.checkpointUnlocked(checkpoint)) this.save.campaignId = checkpoint.id;
-      }
-      if (this.nebulaUnlocked && nebula.some(entry => entry.id === stored.nebulaId)) {
-        this.save.nebulaId = String(stored.nebulaId);
-      }
-      if (typeof stored.labId === 'string' && labIds.has(stored.labId)) this.save.labId = stored.labId;
-      if (stored.mode === 'nebula' && this.nebulaUnlocked) this.save.mode = 'nebula';
-      if (stored.mode === 'lab' && this.labUnlocked) this.save.mode = 'lab';
+      this.save = readSave();
     } catch {
       this.persistence = false;
     }
   }
 
-  persist() {
-    try {
-      localStorage.setItem(KEY, JSON.stringify(this.save));
-      this.persistence = true;
-    } catch {
-      this.persistence = false;
+  #persist(change: (save: Save) => void) {
+    change(this.save);
+    const write = () => {
+      try {
+        const durable = readSave();
+        change(durable);
+        localStorage.setItem(KEY, JSON.stringify(durable));
+        this.#setPersistence(true);
+      } catch {
+        this.#setPersistence(false);
+      }
+    };
+    // Serialize the read and write across tabs on HTTPS and localhost.
+    if (navigator.locks) {
+      void navigator.locks.request(KEY, write).catch(() => this.#setPersistence(false));
+    } else {
+      write();
     }
+  }
+
+  #setPersistence(available: boolean) {
+    if (this.persistence === available) return;
+    this.persistence = available;
+    this.onPersistenceChange();
+  }
+
+  setSetting<Key extends keyof Save['settings']>(key: Key, value: Save['settings'][Key]) {
+    this.#persist(save => { save.settings[key] = value; });
   }
 
   get checkpoint() {
@@ -106,19 +144,20 @@ export class Campaign {
   }
 
   edit(source: string) {
-    this.save.drafts[this.workspaceId] = source;
-    this.persist();
+    const id = this.workspaceId;
+    this.#persist(save => { save.drafts[id] = source; });
   }
 
   resetDraft() {
-    delete this.save.drafts[this.workspaceId];
-    this.persist();
+    const id = this.workspaceId;
+    this.#persist(save => { delete save.drafts[id]; });
   }
 
   startOver() {
-    const settings = this.save.settings;
-    this.save = {...fresh(settings.oriented), settings};
-    this.persist();
+    this.#persist(save => {
+      const {settings} = save;
+      Object.assign(save, fresh(settings.oriented), {settings});
+    });
   }
 
   isComplete(id: string) {
@@ -126,7 +165,7 @@ export class Campaign {
   }
 
   completeSector(sector: Sector) {
-    return sector.campaign.every(checkpoint => this.isComplete(checkpoint.id));
+    return hasCleared(this.save, sector.campaign);
   }
 
   get restored() {
@@ -138,7 +177,7 @@ export class Campaign {
   }
 
   get nebulaUnlocked() {
-    return campaign.every(checkpoint => this.isComplete(checkpoint.id));
+    return hasCleared(this.save, campaign);
   }
 
   sectorUnlocked(sector: Sector) {
@@ -146,49 +185,54 @@ export class Campaign {
   }
 
   checkpointUnlocked(checkpoint: Checkpoint) {
-    const index = campaign.indexOf(checkpoint);
-    return index >= 0 && campaign.slice(0, index).every(entry => this.isComplete(entry.id));
+    return checkpointUnlocked(this.save, checkpoint);
   }
 
   selectMode(mode: Mode) {
     if ((mode === 'lab' && !this.labUnlocked) || (mode === 'nebula' && !this.nebulaUnlocked)) return false;
-    this.save.mode = mode;
-    this.persist();
+    this.#persist(save => { save.mode = mode; });
+    return true;
+  }
+
+  selectCheckpoint(checkpoint: Checkpoint) {
+    if (!this.checkpointUnlocked(checkpoint)) return false;
+    this.#persist(save => { save.campaignId = checkpoint.id; });
     return true;
   }
 
   selectSector(sector: Sector, mode: Exclude<Mode, 'lab'> = 'campaign', replay = false) {
     if (mode === 'nebula') {
       if (!this.nebulaUnlocked) return false;
-      this.save.nebulaId = sector.nebula.id;
+      this.#persist(save => { save.nebulaId = sector.nebula.id; save.mode = mode; });
     } else {
       if (!this.sectorUnlocked(sector)) return false;
-      this.save.campaignId = (replay ? sector.campaign[0] :
-        sector.campaign.find(checkpoint => !this.isComplete(checkpoint.id)) ?? sector.campaign[0]).id;
+      const checkpoint = replay ? sector.campaign[0] :
+        sector.campaign.find(entry => !this.isComplete(entry.id)) ?? sector.campaign[0];
+      this.#persist(save => { save.campaignId = checkpoint.id; save.mode = mode; });
     }
-    return this.selectMode(mode);
+    return true;
   }
 
   advance() {
     const list = this.save.mode === 'nebula' ? nebula : campaign;
     const next = list[list.indexOf(this.checkpoint) + 1];
     if (!next || !this.isComplete(this.checkpoint.id)) return false;
-    if (this.save.mode === 'nebula') this.save.nebulaId = next.id;
-    else this.save.campaignId = next.id;
-    this.persist();
+    const key = this.save.mode === 'nebula' ? 'nebulaId' : 'campaignId';
+    this.#persist(save => { save[key] = next.id; });
     return true;
   }
 
   selectLab(id: string) {
     if (!this.labUnlocked || !labIds.has(id)) return false;
-    this.save.labId = id;
-    return this.selectMode('lab');
+    this.#persist(save => { save.labId = id; save.mode = 'lab'; });
+    return true;
   }
 
   recordClear() {
     if (this.save.mode === 'lab' || this.isComplete(this.checkpoint.id)) return false;
-    this.save.completed[this.checkpoint.id] = Date.now();
-    this.persist();
+    const {id} = this.checkpoint;
+    const clearedAt = Date.now();
+    this.#persist(save => { save.completed[id] ??= clearedAt; });
     return true;
   }
 }
