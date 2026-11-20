@@ -41,9 +41,8 @@ function checkpointUnlocked(save: Save, checkpoint: Checkpoint) {
   return index >= 0 && hasCleared(save, campaign.slice(0, index));
 }
 
-function readSave(): Save {
+function readSave(encoded = localStorage.getItem(KEY)): Save {
   const legacy = localStorage.getItem('numpy-nebula-briefing-dismissed') === 'true';
-  const encoded = localStorage.getItem(KEY);
   const save = fresh(legacy);
   if (!encoded) return save;
   let stored: Record<string, unknown>;
@@ -89,14 +88,20 @@ export class Campaign {
     } catch {
       this.persistence = false;
     }
-    window.addEventListener('storage', event => {
-      if (event.key !== KEY || !event.newValue) return;
+    const observe = (encoded?: string) => {
       try {
-        this.#observeReset(readSave());
+        this.#observeReset(readSave(encoded));
       } catch {
         this.#setPersistence(false);
       }
+    };
+    window.addEventListener('storage', event => {
+      if (event.key === KEY && event.newValue) observe(event.newValue);
     });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) observe();
+    });
+    window.addEventListener('pageshow', () => observe());
   }
 
   #observeReset(durable: Save) {

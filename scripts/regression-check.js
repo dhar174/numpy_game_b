@@ -158,12 +158,25 @@ async function checkResetRace(browser) {
         held();
       }));
     }));
+    await owner.bringToFront();
     await owner.locator('#confirm-action').click();
+    assert.equal((await getState(owner)).checkpoint.id, campaign[0].id);
+    await owner.waitForFunction(async () => (await navigator.locks.query()).pending
+      .some(lock => lock.name === 'numpy-nebula-save'), null, {polling: 50});
+    await peer.bringToFront();
     await editor(peer).fill('import time\ntime.sleep(1)\n' + solutions[campaign[1].id]);
     await editor(peer).press('Control+Enter');
     await peer.getByText('Running Python…', {exact: true}).waitFor();
     await peer.evaluate(() => window.releaseSaveLock());
-    await peer.waitForFunction(() => JSON.parse(window.render_game_to_text()).checkpoint.id === 'boot-power-core');
+    await owner.bringToFront();
+    // Observe the owner's actual write before checking delivery to the peer.
+    await owner.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
+    const reset = await owner.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
+    assert.equal(reset.generation, 1, 'The owner must commit the reset while a stale draft is queued');
+    assert.deepEqual(reset.completed, {});
+    await peer.bringToFront();
+    await peer.waitForFunction(() => JSON.parse(window.render_game_to_text()).checkpoint.id === 'boot-power-core',
+      null, {polling: 50});
     await ready(peer);
     for (const tab of [owner, peer]) {
       await tab.reload();
