@@ -5,6 +5,7 @@ export type Mode = 'campaign' | 'nebula' | 'lab';
 export type Motion = 'system' | 'reduced' | 'full';
 type Save = {
   version: 2;
+  generation: number;
   mode: Mode;
   campaignId: string;
   nebulaId: string;
@@ -21,7 +22,7 @@ const validIds = new Set([...campaign, ...nebula].map(checkpoint => checkpoint.i
 const labIds = new Set(labDatasets.map(dataset => dataset.id));
 
 function fresh(oriented = false): Save {
-  return {version: 2, mode: 'campaign', campaignId: campaign[0].id,
+  return {version: 2, generation: 0, mode: 'campaign', campaignId: campaign[0].id,
     nebulaId: nebula[0].id, labId: labDatasets[0].id, drafts: {}, completed: {},
     settings: {plain: false, sound: false, ambience: false, motion: 'system', oriented}};
 }
@@ -52,6 +53,9 @@ function readSave(): Save {
     return save;
   }
   if (stored.version !== 2) return save;
+  if (typeof stored.generation === 'number' && Number.isSafeInteger(stored.generation) && stored.generation >= 0) {
+    save.generation = stored.generation;
+  }
   const {plain, sound, ambience, motion, oriented} = ownRecord(stored.settings);
   save.settings = {
     plain: plain === true, sound: sound === true, ambience: ambience === true,
@@ -79,21 +83,46 @@ export class Campaign {
   save = fresh();
   persistence = true;
 
-  constructor(private readonly onPersistenceChange: () => void) {
+  constructor(private readonly onPersistenceChange: () => void, private readonly onReset: () => void) {
     try {
       this.save = readSave();
     } catch {
       this.persistence = false;
     }
+    window.addEventListener('storage', event => {
+      if (event.key !== KEY || !event.newValue) return;
+      try {
+        this.#observeReset(readSave());
+      } catch {
+        this.#setPersistence(false);
+      }
+    });
+  }
+
+  #observeReset(durable: Save) {
+    if (durable.generation <= this.save.generation) return;
+    this.save = durable;
+    this.onReset();
   }
 
   #persist(change: (save: Save) => void) {
+    const generation = this.save.generation;
     change(this.save);
     const write = () => {
       try {
         const durable = readSave();
-        change(durable);
-        localStorage.setItem(KEY, JSON.stringify(durable));
+        if (durable.generation > generation) {
+          this.#observeReset(durable);
+          return;
+        }
+        if (durable.generation < generation) {
+          // Storage recovered after a reset that was only saved in this tab.
+          // No progress in the older generation belongs to this campaign.
+          localStorage.setItem(KEY, JSON.stringify(this.save));
+        } else {
+          change(durable);
+          localStorage.setItem(KEY, JSON.stringify(durable));
+        }
         this.#setPersistence(true);
       } catch {
         this.#setPersistence(false);
@@ -156,7 +185,7 @@ export class Campaign {
   startOver() {
     this.#persist(save => {
       const {settings} = save;
-      Object.assign(save, fresh(settings.oriented), {settings});
+      Object.assign(save, fresh(settings.oriented), {settings, generation: save.generation + 1});
     });
   }
 

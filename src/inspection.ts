@@ -114,7 +114,7 @@ export class Inspector {
     const button = element('button', label, 'utility');
     button.type = 'button';
     button.addEventListener('click', () => {
-      if (!this.#selection) return;
+      if (!this.#selection || button.getAttribute('aria-disabled') === 'true') return;
       this.#selection = {...this.#selection, [axis]: Math.max(0, this.#selection[axis] + delta)};
       this.request(this.#selection);
     });
@@ -134,10 +134,10 @@ export class Inspector {
     const {rows, cols, selection, cells} = preview;
     this.#previousRow.hidden = this.#nextRow.hidden = rows <= 16;
     this.#previousCol.hidden = this.#nextCol.hidden = cols <= 16;
-    this.#previousRow.disabled = selection.row === 0;
-    this.#previousCol.disabled = selection.col === 0;
-    this.#nextRow.disabled = selection.row + 16 >= rows;
-    this.#nextCol.disabled = selection.col + 16 >= cols;
+    this.#previousRow.setAttribute('aria-disabled', String(selection.row === 0));
+    this.#previousCol.setAttribute('aria-disabled', String(selection.col === 0));
+    this.#nextRow.setAttribute('aria-disabled', String(selection.row + 16 >= rows));
+    this.#nextCol.setAttribute('aria-disabled', String(selection.col + 16 >= cols));
     this.#caption.textContent = rows > 16 || cols > 16
       ? 'Rows ' + (selection.row + 1) + '–' + Math.min(selection.row + 16, rows) + ' of ' + rows
         + ' · Columns ' + (selection.col + 1) + '–' + Math.min(selection.col + 16, cols) + ' of ' + cols

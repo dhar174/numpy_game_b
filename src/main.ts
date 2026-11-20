@@ -20,7 +20,12 @@ const button = (id: string) => get<HTMLButtonElement>(id);
 const details = (id: string) => get<HTMLDetailsElement>(id);
 const dialog = (id: string) => get<HTMLDialogElement>(id);
 
-const game = new Campaign(syncStorage);
+const game = new Campaign(syncStorage, () => {
+  onConfirm = null;
+  document.querySelectorAll<HTMLDialogElement>('dialog[open]').forEach(modal => modal.close());
+  setMap(false);
+  openWorkspace();
+});
 const motion = matchMedia('(prefers-reduced-motion: reduce)');
 const ship = new ShipView(get<HTMLCanvasElement>('ship-canvas'));
 const runButton = button('run-btn');
@@ -99,7 +104,7 @@ function run() {
   const input = {
     runId: ++issuedRunId, revision, checkpointId: game.workspaceId,
     source: editor.source, setup: checkpoint?.setup ?? '',
-    alternate: checkpoint?.alternate, checks: checkpoint?.checks ?? [],
+    alternate: checkpoint?.alternate, guardDivision: checkpoint?.guardDivision, checks: checkpoint?.checks ?? [],
   };
   engineNote = '';
   engine.run(input);
@@ -134,7 +139,8 @@ function syncControls() {
   const status = get('engine-status');
   status.dataset.state = engine.status;
   status.textContent = {loading: 'Loading NumPy…', ready: 'NumPy ready', failed: 'Runtime offline'}[engine.status];
-  runButton.disabled = engine.status !== 'ready' || !!engine.activeRun;
+  runButton.setAttribute('aria-disabled', String(engine.status !== 'ready' || !!engine.activeRun));
+  if (!engine.activeRun && document.activeElement === stopButton) runButton.focus();
   stopButton.hidden = !engine.activeRun;
   retryButton.hidden = engine.status !== 'failed';
   const current = game.save.mode === 'lab' ? null : game.checkpoint;
@@ -173,7 +179,11 @@ function syncControls() {
       state = 'success';
     } else if (current) {
       const count = result.checks.filter(check => check.passed).length;
-      message = count + ' of ' + result.checks.length + ' checks passed. Review the feedback in Run output.';
+      const failed = result.checks.find(check => !check.passed);
+      message = count + ' of ' + result.checks.length + ' checks passed.';
+      if (result.alternateError) message += ' The visible sample passed. Second dataset: ' + friendly(result.alternateError);
+      else if (failed?.samplePassed) message += ' The visible sample passed. Check the second dataset.';
+      if (failed && !result.alternateError) message += ' ' + failed.label + '. ' + failed.hint;
       state = 'stale';
     } else {
       message = 'Run complete. Explore the result in Array inspector.';
@@ -307,7 +317,7 @@ function renderCheckpoint() {
   get('dataset-control').hidden = !inLab;
   get<HTMLSelectElement>('dataset-select').value = game.lab.id;
   details('transmission').hidden = inLab;
-  details('transmission').open = !game.save.settings.oriented && !inLab && matchMedia('(min-width: 746px)').matches;
+  details('transmission').open = false;
   get('transmission-text').textContent = sector.transmission;
   get('checkpoints').replaceChildren(...steps.map((checkpoint, idx) => {
     const control = element('button', (game.isComplete(checkpoint.id) ? '✓ ' : '') + 'Checkpoint ' + (idx + 1), 'checkpoint');
@@ -323,6 +333,8 @@ function renderCheckpoint() {
   }));
   details('setup-details').hidden = inLab || !current.setup.trim();
   details('setup-details').open = false;
+  const inputs = Array.from(current.setup.matchAll(/^([a-zA-Z_]\w*(?:,\s*[a-zA-Z_]\w*)*)\s*=/gm), match => match[1]);
+  get('input-names').textContent = inputs.join(', ');
   get('setup-code').textContent = current.setup;
   details('hint-details').hidden = inLab;
   details('hint-details').open = false;
@@ -480,8 +492,10 @@ button('map-button').addEventListener('click', () => {
     rooms.find(room => room.sector === game.sector)?.control.focus({preventScroll: true});
   }
 });
-get('ship-map').addEventListener('keydown', event => {
-  if (event.key === 'Escape' && button('map-button').getAttribute('aria-expanded') === 'true') {
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]')
+      && button('map-button').getClientRects().length && button('map-button').getAttribute('aria-expanded') === 'true') {
+    event.preventDefault();
     setMap(false);
     button('map-button').focus();
   }

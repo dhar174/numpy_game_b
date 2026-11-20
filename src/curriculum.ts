@@ -7,6 +7,7 @@ export interface Checkpoint {
   starter: string;
   setup: string;
   alternate: string;
+  guardDivision?: boolean;
   hints: string[];
   prediction?: { question: string; options: string[]; answer: number; explanation: string };
   checks: { label: string; expr: string; hint: string }[];
@@ -471,7 +472,7 @@ export const sectors: Sector[] = [
           check("Merged modules sit side by side", "bool(np.array_equal(merged, np.concatenate((__initial['left'], __initial['right']), axis=1)))", "Join along the column axis."),
           check("Stacked modules use a new axis", "bool(np.array_equal(stacked, np.stack((__initial['left'], __initial['right'])))) and stacked.shape == (2,) + __initial['left'].shape", "Stack adds an axis."),
           check("Three equal sections preserve the manifest in order",
-            "len(sections) == 3 and all(np.array_equal(part, expected) for part, expected in zip(sections, np.split(__initial['manifest'], 3)))",
+            "np.array_equal(sections, __initial['manifest'].reshape(3, -1))",
             "Split into three equal pieces and preserve order."),
         ],
       }),
@@ -591,6 +592,7 @@ export const sectors: Sector[] = [
     ],
     nebula: checkpoint({
       id: "nebula-zero-safe-shares",
+      guardDivision: true,
       sectorId: "drone-bridge",
       title: "Zero-Safe Traffic Shares",
       objective: "Convert each row into proportions without dividing by zero in an empty traffic lane.",

@@ -1,10 +1,13 @@
+import ast
 import contextlib
 from copy import deepcopy
 import io
 from itertools import islice
 import json
 import math
+import operator
 import traceback
+import warnings
 import numpy as np
 
 MAX_STREAM = 32768
@@ -49,18 +52,84 @@ def describe_error(exc):
     }
 
 
-def run_case(setup, source, checks):
+def checked_division(operation):
+    """Observe executed divisions on the hidden traffic fixture, including on plain copies."""
+    def divide(left, right, *args, **kwargs):
+        # Pyodide can return NaN for 0/0 without a floating-point warning.
+        active = kwargs.get("where", True)
+        if np.ma.isMaskedArray(left) or np.ma.isMaskedArray(right):
+            active = active & ~np.ma.getmaskarray(left) & ~np.ma.getmaskarray(right)
+        _, divisor, mask = np.broadcast_arrays(left, right, active)
+        if np.any((divisor == 0) & mask):
+            raise FloatingPointError("Division evaluated a zero row total. Mask the division or use a safe denominator.")
+        return operation(left, right, *args, **kwargs)
+    return divide
+
+
+class DivisionProbe(ast.NodeTransformer):
+    """Keep normal NumPy arrays, broadcasting, and out= semantics in the grading case."""
+    def visit_BinOp(self, node):
+        self.generic_visit(node)
+        if isinstance(node.op, ast.Div):
+            call = ast.Call(ast.Name("__divide", ast.Load()), [node.left, node.right], [])
+            return ast.copy_location(call, node)
+        return node
+
+    def visit_AugAssign(self, node):
+        self.generic_visit(node)
+        if not isinstance(node.op, ast.Div):
+            return node
+        target = node.target
+        if isinstance(target, ast.Name):
+            call = ast.Call(ast.Name("__idivide", ast.Load()), [ast.Name(target.id, ast.Load()), node.value], [])
+            return ast.copy_location(ast.Assign([target], call), node)
+        # Load the target once, before evaluating the right-hand side, just as /= does.
+        if isinstance(target, ast.Subscript):
+            receiver, key, helper = target.value, target.slice, "__divide_item"
+        else:
+            receiver, key, helper = target.value, ast.Constant(target.attr), "__divide_attr"
+        setter = ast.Call(ast.Name(helper, ast.Load()), [receiver, key], [])
+        return ast.copy_location(ast.Expr(ast.Call(setter, [node.value], [])), node)
+
+    def visit_Call(self, node):
+        self.generic_visit(node)
+        # Resolve the actual callable so aliases of np.divide work as usual.
+        node.func = ast.copy_location(ast.Call(ast.Name("__probe_callable", ast.Load()), [node.func], []), node.func)
+        return node
+
+
+def compile_traffic_case(source, scope):
+    guarded_ufunc = checked_division(np.divide)
+    inplace = checked_division(operator.itruediv)
+
+    def assign_division(receiver, key, get, put):
+        original = get(receiver, key)
+        return lambda denominator: put(receiver, key, inplace(original, denominator))
+
+    scope.update(
+        __divide=checked_division(operator.truediv), __idivide=inplace,
+        __divide_item=lambda obj, key: assign_division(obj, key, operator.getitem, operator.setitem),
+        __divide_attr=lambda obj, key: assign_division(obj, key, getattr, setattr),
+        __probe_callable=lambda function: guarded_ufunc if function is np.divide else function,
+    )
+    tree = DivisionProbe().visit(ast.parse(source, "<mission>"))
+    return compile(ast.fix_missing_locations(tree), "<mission>", "exec")
+
+
+def run_case(setup, source, checks, guard_division=False):
     scope = {"np": np, "__name__": "__main__"}
     stdout = BoundedStream()
     stderr = BoundedStream()
     error = None
     passed = []
-    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+    with (warnings.catch_warnings(), np.printoptions(),
+          contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
         try:
             exec(compile(setup, "<setup>", "exec"), scope)
             initial = deepcopy({name: value for name, value in scope.items()
                                 if not name.startswith("_") and name != "np"}) if checks else {}
-            exec(compile(source, "<mission>", "exec"), scope)
+            code = compile_traffic_case(source, scope) if guard_division else compile(source, "<mission>", "exec")
+            exec(code, scope)
             scope["__initial"] = initial
         except BaseException as exc:
             error = describe_error(exc)
@@ -99,7 +168,7 @@ def run_request(raw):
     second = first
     if not error and payload.get("alternate") is not None and all(first):
         _, _, _, second_error, second = run_case(
-            payload["alternate"], payload["source"], checks)
+            payload["alternate"], payload["source"], checks, payload.get("guardDivision", False))
     report = [] if error else [
         {"label": check["label"], "hint": check["hint"],
          "samplePassed": first[i], "passed": first[i] and i < len(second) and second[i]}

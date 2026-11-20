@@ -15,6 +15,7 @@ export type RunInput = {
   source: string;
   setup: string;
   alternate?: string;
+  guardDivision?: boolean;
   checks: {label: string; expr: string; hint: string}[];
 };
 

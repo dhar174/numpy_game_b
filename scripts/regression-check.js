@@ -85,6 +85,30 @@ async function clear(page, checkpoint) {
     assert.ok(rejected.progress.checksPassing > 0 &&
       rejected.progress.checksPassing < rejected.progress.totalChecks, checkpoint.id + ': near miss should pass some checks');
   }
+  if (checkpoint.id === 'cargo-join-split') {
+    const base = 'all = np.hstack((left, right))\nmerged = all\nstacked = np.array([left, right])\n';
+    assert.equal((await run(page, base + 'sections = manifest.reshape(3, -1)[::-1]')).checkpoint.complete, false);
+    assert.equal((await run(page, base + 'sections = manifest.reshape(3, -1)')).runStatus, 'success');
+  }
+  if (checkpoint.id === 'nebula-column-normalizer') {
+    const equivalent = solutions[checkpoint.id].split('\n').slice(0, -1)
+      .concat('column_energy = np.einsum("ij,ij->j", centered, centered)').join('\n');
+    assert.equal((await run(page, equivalent)).runStatus, 'success');
+  }
+  if (checkpoint.id === 'nebula-zero-safe-shares') {
+    const totals = 'row_totals = counts.sum(axis=1, keepdims=True)\n';
+    const eager = await run(page, 'counts = np.asarray(counts)\n' + totals + 'shares = np.where(row_totals != 0, counts / row_totals, 0)');
+    assert.equal(eager.checkpoint.complete, false);
+    assert.match(eager.output.summary, /Division evaluated a zero row total/);
+    const inPlace = await run(page, totals + 'shares = counts.copy()\nshares[:] /= row_totals\nshares = np.nan_to_num(shares)');
+    assert.equal(inPlace.checkpoint.complete, false);
+    assert.match(inPlace.output.summary, /Division evaluated a zero row total/);
+    for (const source of [
+      'shares = counts / np.where(row_totals == 0, 1, row_totals)',
+      'shares = counts.copy()\nshares[:] /= np.where(row_totals == 0, 1, row_totals)',
+      'active = row_totals[:, 0] != 0\nshares = np.zeros_like(counts)\nshares[active] = counts[active] / row_totals[active]',
+    ]) assert.equal((await run(page, totals + source)).runStatus, 'success');
+  }
   const after = await run(page, solutions[checkpoint.id]);
   assert.equal(after.runStatus, 'success', checkpoint.id + ': ' + after.output.summary);
   assert.ok(after.checkpoint.complete, checkpoint.id + ': no clear recorded');
@@ -95,6 +119,58 @@ async function clear(page, checkpoint) {
 async function next(page) {
   await page.locator('#next-btn').click();
   assert.equal(await page.evaluate(() => document.activeElement.id), 'mission-title');
+}
+
+async function checkBoundary(page, control) {
+  assert.equal(await control.evaluate(node => node === document.activeElement), true);
+  assert.equal(await control.getAttribute('aria-disabled'), 'true');
+  const before = (await getState(page)).activeValue?.preview?.selection;
+  await page.keyboard.press('Enter');
+  assert.deepEqual((await getState(page)).activeValue?.preview?.selection, before);
+}
+
+async function checkResetRace(browser) {
+  const context = await browser.newContext();
+  try {
+    const owner = await context.newPage();
+    await owner.goto(site.url);
+    await ready(owner);
+    await run(owner, solutions[campaign[0].id]);
+    await next(owner);
+    await owner.locator('#settings-button').click();
+    await owner.locator('#plain-setting').check();
+    await owner.locator('#new-game').click();
+    await owner.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
+    const peer = await context.newPage();
+    await peer.goto(site.url);
+    await ready(peer);
+    assert.equal((await getState(peer)).checkpoint.id, campaign[1].id);
+    // Hold the lock so the reset is queued first, then enqueue a stale draft and run.
+    await peer.evaluate(() => new Promise(held => {
+      void navigator.locks.request('numpy-nebula-save', () => new Promise(release => {
+        window.releaseSaveLock = release;
+        held();
+      }));
+    }));
+    await owner.locator('#confirm-action').click();
+    await editor(peer).fill('import time\ntime.sleep(1)\n' + solutions[campaign[1].id]);
+    await editor(peer).press('Control+Enter');
+    await peer.getByText('Running Python…', {exact: true}).waitFor();
+    await peer.evaluate(() => window.releaseSaveLock());
+    await peer.waitForFunction(() => JSON.parse(window.render_game_to_text()).checkpoint.id === 'boot-power-core');
+    await ready(peer);
+    for (const tab of [owner, peer]) {
+      await tab.reload();
+      await ready(tab);
+      const saved = await tab.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
+      assert.deepEqual(saved.completed, {});
+      assert.deepEqual(saved.drafts, {});
+      assert.equal(saved.settings.plain, true);
+      assert.equal((await getState(tab)).checkpoint.id, campaign[0].id);
+    }
+  } finally {
+    await context.close();
+  }
 }
 
 async function checkLayout(page, width, height, label) {
@@ -122,11 +198,16 @@ async function play(name) {
     const page = await context.newPage();
     const errors = listen(page);
     const external = [];
-    page.on('request', request => {
-      if (request.url().startsWith('http') && new URL(request.url()).origin !== new URL(site.url).origin) external.push(request.url());
+    const loaded = new Set();
+    context.on('response', response => {
+      if (response.ok()) loaded.add(new URL(response.url()).pathname);
+    });
+    context.on('request', request => {
+      if (request.url().startsWith('http') && !request.url().startsWith(site.url)) external.push(request.url());
     });
     await page.goto(site.url);
     await ready(page);
+    assert.equal(new URL(page.url()).pathname, '/numpy_game_b/');
     const initial = await getState(page);
     assert.equal(initial.checkpoint.id, 'boot-power-core');
     assert.ok(!initial.progress.labUnlocked && !initial.progress.nebulaUnlocked);
@@ -134,7 +215,17 @@ async function play(name) {
     assert.equal(await page.locator('[data-mode="lab"]').isDisabled(), true);
     if (name === 'chromium') {
       for (const [width, height] of [[1440,900],[1240,850],[1024,768],[768,1024],[390,844],[320,640]]) {
+        await page.setViewportSize({width, height});
+        await page.reload();
+        await ready(page);
+        await page.evaluate(() => document.fonts.ready);
         await checkLayout(page, width, height, String(width));
+        const art = await page.locator('#ship-canvas').boundingBox();
+        const copy = await page.locator('.hero-copy').boundingBox();
+        assert.ok(art.height > 40 && (copy.y + copy.height <= art.y + 1 || copy.x + copy.width <= art.x + 1), 'Hero overlaps at ' + width);
+        if (width === 1024) assert.ok((await editor(page).boundingBox()).y < height - 46, 'First two lines in view');
+        assert.equal(await page.getByRole('button', {name:'Fullscreen ship view', includeHidden:true}).locator('svg').count(), 1);
+        assert.match(await page.locator('#setup-details summary').innerText(), /power_shape.*power_dtype/);
         await capture(page, 'reflow-' + width);
       }
       // A 1440px desktop at 200% zoom has a 720px CSS layout viewport.
@@ -160,9 +251,24 @@ async function play(name) {
     assert.match(invalid.output.summary, /SyntaxError on line 1/);
     if (name === 'chromium') await capture(page, 'python-error');
 
+    for (const width of name === 'chromium' ? [390, 1024, 1440] : [1440]) {
+      const height = width === 390 ? 844 : width === 1024 ? 768 : 900;
+      await page.setViewportSize({width, height});
+      const wrong = await run(page, 'power_core = np.ones(power_shape, dtype=power_dtype)');
+      assert.match(wrong.output.summary, /Every power cell starts at zero.*Choose the zero-filled creation function/s);
+      if (name === 'chromium') await capture(page, 'failed-check-' + width);
+      if (width < 1121) {
+        await page.locator('#map-button').press('Enter');
+        await page.keyboard.press('Tab');
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('#map-button').getAttribute('aria-expanded'), 'false');
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'map-button');
+      }
+    }
     const hardcoded = await run(page,
       '# np.zeros(power_shape, dtype=power_dtype)\npower_core = np.zeros((3, 4), dtype=np.float64)');
     assert.equal(hardcoded.checkpoint.complete, false);
+    assert.match(hardcoded.output.summary, /visible sample passed/i);
     assert.match(await page.locator('#validation-list').innerText(), /visible sample passed/i);
     if (name === 'chromium') {
       await editor(page).fill('import time\ntime.sleep(0.5)\npower_core = np.zeros(power_shape, dtype=power_dtype)');
@@ -172,10 +278,20 @@ async function play(name) {
       await page.getByText('Last run shown. Your draft has changed.', {exact: true}).waitFor();
       assert.equal((await getState(page)).checkpoint.complete, false);
     }
+    await checkResetRace(browser);
     const peer = await context.newPage();
     await peer.goto(site.url);
     await ready(peer);
-    const equivalent = await run(page, 'power_core = np.full(power_shape, 0, dtype=power_dtype)');
+    const equivalent = await run(page, [
+      'import warnings',
+      'assert np.get_printoptions()["precision"] == 8',
+      'warnings.warn("fresh fixture")',
+      'warnings.simplefilter("error", UserWarning)',
+      'np.set_printoptions(precision=1)',
+      'power_core = np.full(power_shape, 0, dtype=power_dtype)',
+    ].join('\n'), true);
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'next-btn');
     assert.equal(equivalent.checkpoint.complete, true);
     const core = await inspect(page, 'power_core');
     assert.deepEqual(core.cells.map(row => row.length), [4,4,4]);
@@ -192,6 +308,7 @@ async function play(name) {
     assert.equal((await getState(page)).checkpoint.complete, true);
     assert.match(await draftText(page), /saved edit/);
     await next(page);
+    assert.match(await page.locator('#setup-details summary').innerText(), /low, high, sample_count/);
     await clear(page, campaign[1]);
     const peerDraft = '# edited from a second tab opened before the clear';
     await editor(peer).fill(peerDraft);
@@ -221,6 +338,7 @@ async function play(name) {
 
     await page.locator('[data-mode="lab"]').click();
     const probe = [
+      'tall = np.arange(40).reshape(20, 2)',
       'vector = np.arange(40)',
       'wide = np.arange(64).reshape(2, 32)',
       'rank4 = np.arange(24).reshape(2, 2, 2, 3)',
@@ -232,6 +350,13 @@ async function play(name) {
       "globals()['x' * 200000] = np.array([1])",
       "print('é' * 20000)",
     ].join('\n');
+    for (const ending of ['', '\nraise ValueError("test cleanup")']) {
+      await run(page, 'import warnings\nnp.set_printoptions(precision=1)\nwarnings.simplefilter("error", UserWarning)' + ending);
+      const clean = await run(page, 'import warnings\nwarnings.warn("still a warning")\nprint(np.array([1/3]))');
+      assert.equal(clean.runStatus, 'success');
+      assert.equal(clean.output.stdout.trim(), '[0.33333333]');
+      assert.match(await page.locator('#stderr-pane').textContent(), /UserWarning: still a warning/);
+    }
     const lab = await run(page, probe);
     assert.equal(lab.phase, 'lab');
     assert.equal(lab.runStatus, 'success');
@@ -243,8 +368,27 @@ async function play(name) {
     const wide = await inspect(page, 'wide');
     assert.equal(wide.cells[0].length, 16);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
-    await page.getByRole('button', {name: 'Next columns'}).click();
+    const nextColumn = page.getByRole('button', {name: 'Next columns'});
+    await nextColumn.press('Enter');
     await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 16);
+    await checkBoundary(page, nextColumn);
+    const previousColumn = page.getByRole('button', {name: 'Previous columns'});
+    await previousColumn.press('Enter');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 0);
+    await checkBoundary(page, previousColumn);
+    await inspect(page, 'vector');
+    await nextColumn.press('Enter');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 16);
+    await nextColumn.press('Enter');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 32);
+    await checkBoundary(page, nextColumn);
+    await inspect(page, 'tall');
+    for (const [label, row] of [['Next rows', 16], ['Previous rows', 0]]) {
+      const control = page.getByRole('button', {name: label});
+      await control.press('Enter');
+      await page.waitForFunction(row => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.row === row, row);
+      await checkBoundary(page, control);
+    }
     const rank4 = await inspect(page, 'rank4');
     assert.equal(rank4.cells[0][0].index, '[0, 0, 0, 0]');
     const axis = page.getByLabel('Axis 0', {exact: true});
@@ -261,9 +405,13 @@ async function play(name) {
     assert.match(await draftText(page), /rank4/);
 
     await editor(page).fill('while True:\n    pass');
-    await runButton(page).click();
+    await runButton(page).press('Enter');
     await page.getByText('Running Python…', {exact:true}).waitFor();
-    await page.getByRole('button', {name: 'Stop', exact: true}).click();
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'run-btn');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'stop-btn');
+    await page.keyboard.press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'run-btn');
     assert.match(await page.locator('#run-summary').textContent(), /Run stopped/);
     await ready(page);
     const recovered = await run(page, "output = np.array([4, 5])\nprint('recovered')");
@@ -335,8 +483,20 @@ async function play(name) {
     await settings.getByRole('button',{name:'Start over'}).click();
     await page.getByRole('dialog',{name:'Start over?'}).getByRole('button',{name:'Start over'}).click();
     assert.equal((await getState(page)).progress.completed.length,0);
+    await editor(page).focus();
+    await editor(page).press('Shift');
+    assert.equal(await editor(page).evaluate(node => getComputedStyle(node).outlineWidth), '2px');
+    assert.equal((await run(page, solutions[campaign[0].id], true)).runStatus, 'success');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'next-btn');
     assert.deepEqual(errors,[]);
     assert.deepEqual(external,[]);
+    if (name === 'chromium') {
+      for (const pattern of [/python-worker-.*\.js$/, /pyodide\.mjs$/, /\.wasm(?:\.gz)?$/, /numpy-.*\.whl$/,
+        /rich-editor-.*\.js$/, /\.woff2$/, /ship-cutaway\.webp$/]) {
+        assert.ok([...loaded].some(path => pattern.test(path)), 'Missing production asset ' + pattern);
+      }
+    }
 
     if (name === 'chromium') {
       const offline = await browser.newPage({viewport:{width:390,height:844}, hasTouch:true, isMobile:true});
@@ -348,11 +508,36 @@ async function play(name) {
       await offline.goto(site.url);
       await offline.getByText('Runtime offline',{exact:true}).waitFor();
       assert.ok(await offline.locator('#storage-notice').isVisible());
+      const fallbackEditor = offline.locator('#code-editor textarea');
+      await fallbackEditor.focus();
+      await fallbackEditor.press('Shift');
+      assert.equal(await fallbackEditor.evaluate(node => getComputedStyle(node).outlineWidth), '2px');
       await offline.unroute(block);
       await offline.getByRole('button',{name:'Retry engine'}).tap();
       await ready(offline);
       await clear(offline,campaign[0]);
       assert.equal((await getState(offline)).checkpoint.complete,true);
+
+      // A temporary quota error during Start over must not strand subsequent saves.
+      await page.evaluate(() => {
+        const write = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          if (key === 'numpy-nebula-save') throw new DOMException('Full', 'QuotaExceededError');
+          return write.call(this, key, value);
+        };
+        window.restoreStorage = () => { Storage.prototype.setItem = write; };
+      });
+      await page.locator('#settings-button').click();
+      await page.locator('#new-game').click();
+      await page.locator('#confirm-action').click();
+      await page.locator('#storage-notice').waitFor();
+      await page.evaluate(() => window.restoreStorage());
+      await editor(page).fill('# draft after recovery');
+      await page.locator('#storage-notice').waitFor({state:'hidden'});
+      await page.reload();
+      await ready(page);
+      assert.deepEqual((await getState(page)).progress.checkpoints, []);
+      assert.equal(await draftText(page), '# draft after recovery');
     }
 
     console.log(name + ' passed: production subpath, all 15 campaign checkpoints and seven challenges, Lab, worker stop/recovery, inspector, save/reset, and console/network checks.');

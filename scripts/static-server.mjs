@@ -13,7 +13,7 @@ const types = {'.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=u
 
 export async function serveBuild(port = 0) {
   const root = fileURLToPath(new URL('../dist/', import.meta.url));
-  const prefix = '/numpy-nebula/';
+  const prefix = '/numpy_game_b/';
   const server = createServer(async (request, response) => {
     try {
       const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
