@@ -132,7 +132,11 @@ pre { margin: 0; font: 400 .78rem/1.6 var(--mono); white-space: pre-wrap; overfl
 .code-editor textarea { display: block; width: 100%; min-height: 236px; padding: 12px; resize: vertical; color: var(--text); background: #0a111c; border: none; }
 .code-editor .cm-editor.cm-focused { outline: 2px solid var(--mint); outline-offset: -2px; }
 .run-banner { min-height: 39px; padding: 6px 10px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; border-bottom: 1px solid var(--border); background: #101b2a; }
-.editor-foot .primary { min-height: 39px; font-size: .875rem; }
+.editor-deck { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.editor-bar, .code-editor, .editor-foot { grid-column: 1 / -1; }
+.run-banner { grid-column: 1 / -1; grid-row: 2; }
+.editor-deck:has(#next-btn:not([hidden])) .run-banner { grid-column: 1; }
+#next-btn { grid-column: 2; grid-row: 2; align-self: center; margin: 4px 6px; min-height: 39px; font-size: .875rem; }
 #run-summary { flex: 1 1 170px; color: var(--muted); overflow-wrap: anywhere; }
 .run-banner[data-state="success"] #run-summary { color: var(--mint); }
 .run-banner[data-state="error"] #run-summary { color: var(--danger); }
@@ -220,7 +224,6 @@ dialog::backdrop { background: #050914c9; }
   .work-panel { padding: 12px; }
   .code-editor .cm-editor { height: 195px; }
   .code-editor textarea { min-height: 195px; }
-  .editor-foot:has(#next-btn:not([hidden])) { position: sticky; bottom: 0; z-index: 1; background: #101b2a; }
   .editor-actions button { min-height: 44px; padding-inline: 7px; font-size: .79rem; }
   .editor-bar { padding-inline: 7px; }
   .file-label { font-size: .63rem; }

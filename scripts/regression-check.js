@@ -312,6 +312,19 @@ async function play(name) {
     await page.keyboard.press('Tab');
     assert.equal(await page.evaluate(() => document.activeElement.id), 'next-btn');
     assert.equal(equivalent.checkpoint.complete, true);
+    if (name === 'chromium') {
+      for (const [width, height] of [[390, 844], [1024, 768], [1440, 900]]) {
+        await page.setViewportSize({width, height});
+        await page.evaluate(() => window.scrollTo(0, 0));
+        const advance = page.locator('#next-btn');
+        const box = await advance.boundingBox();
+        const code = await page.locator('#code-editor').boundingBox();
+        assert.ok(box.y >= 0 && box.y + box.height <= Math.min(height, code.y), 'Advance is visible above the editor at ' + width);
+        assert.equal(await advance.evaluate(node => getComputedStyle(node).fontFamily),
+          await runButton(page).evaluate(node => getComputedStyle(node).fontFamily));
+        await capture(page, 'advance-' + width);
+      }
+    }
     const core = await inspect(page, 'power_core');
     assert.deepEqual(core.cells.map(row => row.length), [4,4,4]);
     if (name === 'chromium') await capture(page,'boot-restored');
