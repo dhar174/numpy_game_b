@@ -1,439 +1,585 @@
-import assert from "node:assert/strict";
-import fs from "node:fs";
-import http from "node:http";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+import assert from 'node:assert/strict';
+import {mkdir, readFile} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {chromium, firefox, webkit} from 'playwright';
+import {labDatasets, sectors} from '../src/curriculum.ts';
+import {solutions} from './solutions.ts';
+import {serveBuild} from './static-server.mjs';
 
-import { chromium } from "playwright";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const rootDir = path.resolve(__dirname, "..");
-
-const editorLabel = "NumPy mission code editor";
-
-const solutions = [
-  {
-    id: "boot-bay",
-    activeVariable: "power_core [ndarray]",
-    expectedShape: [3, 4],
-    code: `# Boot Bay: restore the starter arrays.
-# NumPy is already imported as np.
-# Replace each placeholder with the healthy array described in the checklist.
-
-# TODO: make power_core a 3x4 float64 grid of zeros.
-power_core = np.zeros((3, 4), dtype=np.float64)
-
-# TODO: create six evenly spaced values from 0.1 to 1.1, then reshape to 2x3.
-calibration = np.linspace(0.1, 1.1, 6, dtype=np.float64).reshape(2, 3)
-
-# TODO: make nanobots a 2x2 matrix filled with 7 using dtype=np.int16.
-nanobots = np.full((2, 2), 7, dtype=np.int16)
-
-# Leave boot_matrix as the diagnostic matrix you inspect in report.
-boot_matrix = np.array([[2, 4, 6], [8, 10, 12]], dtype=np.int16)
-
-# TODO: create the course line with np.arange(10, 20, 2).
-course_line = np.arange(10, 20, 2)
-
-report = {
-    "shape": boot_matrix.shape,
-    "ndim": boot_matrix.ndim,
-    "size": boot_matrix.size,
-    "dtype": str(boot_matrix.dtype),
+const browsers = {chromium, firefox, webkit};
+const target = process.env.NEBULA_BROWSER || 'chromium';
+const names = target === 'all' ? Object.keys(browsers) : [target];
+const shotDir = process.env.NEBULA_SHOTS;
+const campaign = sectors.flatMap(sector => sector.campaign);
+const challenges = sectors.map(sector => sector.nebula);
+const catalog = [...campaign, ...challenges];
+const nearMisses = {
+  'cargo-join-split': solutions['cargo-join-split'].replace(
+    'sections = np.split(manifest, 3)',
+    'sections = [manifest[:1], manifest[1:2], manifest[2:]]',
+  ),
+  'nebula-column-normalizer': solutions['nebula-column-normalizer'].replace(
+    'centered = signal - column_mean',
+    'centered = np.zeros_like(signal)',
+  ),
+  'nebula-zero-safe-shares': [
+    'row_totals = counts.sum(axis=1, keepdims=True)',
+    'shares = np.where(row_totals != 0, 1.0 / counts.shape[1], 0.0) * np.ones_like(counts)',
+  ].join('\n'),
+};
+assert.deepEqual(sectors.map(sector => sector.campaign.length), [2, 2, 2, 2, 3, 3, 1]);
+assert.equal(labDatasets.length, 4);
+assert.equal(new Set(catalog.map(entry => entry.id)).size, 22);
+assert.deepEqual(Object.keys(solutions).sort(), catalog.map(entry => entry.id).sort());
+for (const entry of catalog) {
+  assert.ok(entry.setup.trim() && entry.alternate.trim() && entry.setup !== entry.alternate, entry.id);
+  assert.ok(entry.starter.trim() && entry.checks.length && entry.hints.length <= 3, entry.id);
 }
 
-print("Boot Bay arrays online.")`,
-  },
-  {
-    id: "sensor-deck",
-    activeVariable: "sensor_grid [ndarray]",
-    expectedShape: [4, 4],
-    code: `# Sensor Deck: restore visibility.
-# The matrix is healthy; your job is to select and mutate the right views.
+const site = await serveBuild();
 
-sensor_grid = np.arange(1, 17).reshape(4, 4)
+const getState = page => page.evaluate(() => JSON.parse(window.render_game_to_text()));
+const editor = page => page.getByRole('textbox', {name: 'NumPy mission code editor'});
+const runButton = page => page.locator('#run-btn');
+const draftText = page => editor(page).evaluate(node => node instanceof HTMLTextAreaElement ? node.value : node.textContent);
 
-# TODO: grab the first row only.
-first_row = sensor_grid[0].copy()
-
-# TODO: take rows 1:3 and columns 1:4.
-scan_window = sensor_grid[1:3, 1:4].copy()
-
-# TODO: use fancy indexing to pull [2, 12, 13].
-priority = sensor_grid[[0, 2, 3], [1, 3, 0]]
-
-view_patch = sensor_grid[:, :2]
-
-# TODO: make copy_patch an actual copy before editing it.
-copy_patch = sensor_grid[:, :2].copy()
-
-# TODO: add 100 to every value in view_patch so sensor_grid changes too.
-view_patch[:] = view_patch + 100
-
-# TODO: set the top-left cell of copy_patch to -999 without changing sensor_grid.
-copy_patch[0, 0] = -999
-
-print("Sensor deck aligned.")`,
-  },
-  {
-    id: "reactor-garden",
-    activeVariable: "boosted [ndarray]",
-    expectedShape: [2, 3],
-    code: `# Reactor Garden: tune the waveform.
-# Build each array from the previous one instead of typing final values by hand.
-
-heat = np.array([[1.0, -4.0, 9.0], [16.0, -25.0, 36.0]])
-bias = np.array([0.5, 1.0, 1.5])
-
-# TODO: take the absolute value first.
-magnitude = np.abs(heat)
-
-# TODO: take the square root of magnitude.
-root_heat = np.sqrt(magnitude)
-
-# TODO: apply np.sin to root_heat.
-wave = np.sin(root_heat)
-
-# TODO: broadcast bias across the rows of root_heat.
-boosted = root_heat + bias
-
-# TODO: use boosted to build efficiency and log_signal.
-efficiency = np.exp(-boosted / 10)
-log_signal = np.log1p(boosted)
-
-# TODO: mark boosted values greater than 4.
-danger = boosted > 4
-
-print("Reactor waveforms tuned.")`,
-  },
-  {
-    id: "quarantine-lab",
-    activeVariable: "quarantine [ndarray]",
-    expectedShape: [3, 3],
-    code: `# Quarantine Lab: stabilize the samples.
-# Build your masks step by step so each one explains the next array.
-
-samples = np.array([
-    [1.2, np.nan, 3.5],
-    [0.4, -1.2, np.nan],
-    [2.1, 0.0, 4.4],
-], dtype=np.float64)
-
-# TODO: mark the finite cells with ~np.isnan(samples).
-finite_mask = ~np.isnan(samples)
-
-# TODO: replace NaN with 0.0 using np.where.
-clean = np.where(finite_mask, samples, 0.0)
-
-# TODO: keep only the clean values that are at least 0.5.
-safe_mask = clean >= 0.5
-filtered = clean[safe_mask]
-
-# TODO: summarize the cleaned grid with np.any and np.all.
-has_breach = np.any(clean < 0)
-all_stable = np.all(clean <= 5)
-
-# TODO: keep safe cells and zero-out the rest.
-quarantine = np.where(safe_mask, clean, 0.0)
-
-print("Lab quarantine sweep staged.")`,
-  },
-  {
-    id: "cargo-forge",
-    activeVariable: "stacked [ndarray]",
-    expectedShape: [2, 2, 2],
-    code: `# Cargo Forge: repack the hold.
-# Reuse the provided arrays. Your job is to reorganize them without losing data.
-
-crates = np.arange(1, 13).reshape(3, 4)
-left = np.array([[1, 2], [3, 4]])
-right = np.array([[5, 6], [7, 8]])
-cube = np.arange(1, 9).reshape(2, 2, 2)
-
-# TODO: reshape crates into a 2x6 grid.
-reshaped = crates.reshape(2, 6)
-
-# TODO: use ravel() for a flat view and flatten() for a flat copy.
-flat_view = crates.ravel()
-flat_copy = crates.flatten()
-
-# TODO: rotate crates with transpose and rotate cube with swapaxes.
-transposed = crates.T
-swapped = np.swapaxes(cube, 0, 2)
-
-# TODO: join left and right across columns, then stack them into a new axis.
-merged = np.concatenate([left, right], axis=1)
-stacked = np.stack([left, right])
-
-# TODO: split np.arange(12) into 3 equal sections.
-sections = np.split(np.arange(12), 3)
-
-# TODO: repeat [1, 2, 3] twice each and tile the checker pattern to 4x4.
-repeated = np.repeat(np.array([1, 2, 3]), 2)
-tiled = np.tile(np.array([[1, 0], [0, 1]]), (2, 2))
-
-print("Cargo patterns queued.")`,
-  },
-  {
-    id: "drone-bridge",
-    activeVariable: "navigation [ndarray]",
-    expectedShape: [2, 2],
-    code: `# Drone Bridge: route the swarm.
-# Keep the route matrices. Replace the placeholder analytics with real NumPy results.
-
-rng = np.random.default_rng(7)
-traffic = rng.integers(2, 20, size=(3, 4))
-
-# TODO: reduce traffic across rows and columns with the correct axes.
-totals = traffic.sum(axis=1)
-means = traffic.mean(axis=0)
-minimum = traffic.min()
-maximum = traffic.max()
-spread = traffic.std()
-argmin_idx = np.argmin(traffic)
-argmax_idx = np.argmax(traffic)
-
-# TODO: sort each row, then argsort only the first row.
-sorted_rows = np.sort(traffic, axis=1)
-sort_order = np.argsort(traffic[0])
-unique_codes = np.unique(np.array([2, 2, 3, 5, 5, 7]))
-
-route_a = np.array([[2, 1, 0], [1, 3, 2]])
-route_b = np.array([[1, 2], [0, 1], [4, 2]])
-
-# TODO: use matrix multiplication for navigation and np.dot for energy_dot.
-navigation = route_a @ route_b
-energy_dot = np.dot(np.array([1, 2, 3]), np.array([4, 5, 6]))
-
-print("Drone bridge awaiting routes.")`,
-  },
-  {
-    id: "colony-core",
-    activeVariable: "course [ndarray]",
-    expectedShape: [2, 2],
-    code: `# Colony Core: execute the rescue sequence.
-# This capstone should read like a NumPy pipeline, not a pile of hand-entered answers.
-
-weights = np.array([
-    [1.0, 0.5],
-    [0.0, 1.0],
-    [1.5, -0.5],
-    [0.5, 1.5],
-    [1.0, 1.0],
-    [0.2, 1.3],
-    [1.1, 0.4],
-    [0.3, 1.2],
-])
-
-# TODO: start with the 4x4 grid from 1 through 16.
-grid = np.arange(1, 17).reshape(4, 4)
-
-# TODO: keep only the even cells with np.where.
-safe = np.where(grid % 2 == 0, grid, 0)
-
-# TODO: broadcast the repair vector across safe, then sum across axis 1.
-row_power = (safe + np.array([0, 5, 10, 15])).sum(axis=1)
-boosted = safe + np.array([0, 5, 10, 15])
-
-# TODO: reshape boosted to (2, 8), then use @ with weights.
-matrix = boosted.reshape(2, 8)
-course = matrix @ weights
-
-# TODO: rescue_score should be the mean of the course matrix.
-rescue_score = course.mean()
-
-print("Colony Core rescue path pending.")`,
-  },
-];
-
-function startServer(root) {
-  const mimeTypes = new Map([
-    [".html", "text/html; charset=utf-8"],
-    [".js", "text/javascript; charset=utf-8"],
-    [".css", "text/css; charset=utf-8"],
-    [".json", "application/json; charset=utf-8"],
-    [".png", "image/png"],
-    [".svg", "image/svg+xml"],
-  ]);
-
-  const server = http.createServer((request, response) => {
-    const requestUrl = new URL(request.url, "http://127.0.0.1");
-    let pathname = decodeURIComponent(requestUrl.pathname);
-    if (pathname === "/") {
-      pathname = "/index.html";
-    }
-
-    const targetPath = path.resolve(root, `.${pathname}`);
-    if (!targetPath.startsWith(root)) {
-      response.writeHead(403).end("Forbidden");
-      return;
-    }
-
-    fs.readFile(targetPath, (error, file) => {
-      if (error) {
-        response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
-        response.end("Not found");
-        return;
-      }
-
-      response.writeHead(200, {
-        "Content-Type": mimeTypes.get(path.extname(targetPath)) ?? "application/octet-stream",
-        "Cache-Control": "no-store",
-      });
-      response.end(file);
-    });
-  });
-
-  return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      resolve({
-        server,
-        origin: `http://127.0.0.1:${address.port}`,
-      });
-    });
-  });
+async function capture(page, name) {
+  if (!shotDir) return;
+  await mkdir(shotDir, {recursive: true});
+  const filename = resolve(shotDir, name + '.png');
+  const screenshot = await page.screenshot({path: filename});
+  assert.ok((await readFile(filename)).equals(screenshot), 'Screenshot readback failed.');
 }
 
-async function getState(page) {
-  return page.evaluate(() => JSON.parse(window.render_game_to_text()));
+async function ready(page) {
+  const status = page.locator('#engine-status');
+  try {
+    await page.locator('#engine-status:is([data-state="ready"], [data-state="failed"])').waitFor({timeout: 35000});
+    assert.equal(await status.textContent(), 'NumPy ready');
+  } catch (error) {
+    throw new Error('Runtime startup: ' + await status.textContent() + ' — ' + await page.locator('#run-summary').textContent(), {cause: error});
+  }
 }
 
-async function waitForReady(page) {
+async function run(page, source, shortcut = false) {
+  await editor(page).fill(source);
+  if (shortcut) await editor(page).press('Control+Enter');
+  else await runButton(page).click();
   await page.waitForFunction(() => {
-    if (typeof window.render_game_to_text !== "function") {
-      return false;
-    }
     const state = JSON.parse(window.render_game_to_text());
-    return state.mode === "ready";
-  }, { timeout: 180000 });
+    return state.lastRunMatchesDraft === true && state.runStatus !== 'running';
+  });
+  return getState(page);
 }
 
-async function waitForMissionReady(page, missionId) {
-  await page.waitForFunction((expectedId) => {
+async function inspect(page, name) {
+  await page.locator('#variable-select').selectOption(name);
+  await page.waitForFunction(variable => {
     const state = JSON.parse(window.render_game_to_text());
-    return state.mode === "ready" && state.mission.id === expectedId && state.arrays.length > 0;
-  }, missionId, { timeout: 30000 });
+    return state.activeVariable === variable && state.activeValue?.preview != null;
+  }, name);
+  return (await getState(page)).activeValue.preview;
 }
 
-async function fillEditor(page, code) {
-  await page.getByRole("textbox", { name: editorLabel }).fill(code);
-}
-
-async function runCurrentMission(page, mission) {
-  console.log(`Running mission: ${mission.id}`);
-  await fillEditor(page, mission.code);
-  await page.getByRole("button", { name: "Run Code" }).click();
-  try {
-    await page.waitForFunction((expectedId) => {
-      const state = JSON.parse(window.render_game_to_text());
-      return state.mission.id === expectedId && state.mission.complete === true;
-    }, mission.id, { timeout: 30000 });
-  } catch (error) {
-    const state = await getState(page);
-    throw new Error(
-      `Mission ${mission.id} did not complete.\nSummary: ${state.output.summary}\nError: ${state.output.error ?? "none"}`,
-      { cause: error },
-    );
+async function clear(page, checkpoint) {
+  const before = await getState(page);
+  assert.equal(before.checkpoint.id, checkpoint.id);
+  if (Object.hasOwn(nearMisses, checkpoint.id)) {
+    const rejected = await run(page, nearMisses[checkpoint.id]);
+    assert.equal(rejected.runStatus, 'stale', checkpoint.id + ': expected review feedback for a wrong result');
+    assert.equal(rejected.checkpoint.complete, false, checkpoint.id + ': near miss earned a clear');
+    assert.ok(rejected.progress.checksPassing > 0 &&
+      rejected.progress.checksPassing < rejected.progress.totalChecks, checkpoint.id + ': near miss should pass some checks');
   }
-
-  const state = await getState(page);
-  assert.equal(state.mission.id, mission.id, `Expected mission ${mission.id} to be active`);
-  assert.equal(state.mission.complete, true, `Mission ${mission.id} should complete`);
-  assert.ok(state.progress.completed.includes(mission.id), `Progress should include ${mission.id}`);
-
-  await page.getByRole("button", { name: mission.activeVariable }).click();
-  const updatedState = await getState(page);
-  assert.deepEqual(updatedState.activeValue?.shape, mission.expectedShape, `${mission.id} inspector shape mismatch`);
+  if (checkpoint.id === 'cargo-join-split') {
+    const base = 'all = np.hstack((left, right))\nmerged = all\nstacked = np.array([left, right])\n';
+    assert.equal((await run(page, base + 'sections = manifest.reshape(3, -1)[::-1]')).checkpoint.complete, false);
+    assert.equal((await run(page, base + 'sections = manifest.reshape(3, -1)')).runStatus, 'success');
+  }
+  if (checkpoint.id === 'nebula-column-normalizer') {
+    const equivalent = solutions[checkpoint.id].split('\n').slice(0, -1)
+      .concat('column_energy = np.einsum("ij,ij->j", centered, centered)').join('\n');
+    assert.equal((await run(page, equivalent)).runStatus, 'success');
+  }
+  if (checkpoint.id === 'nebula-zero-safe-shares') {
+    const totals = 'row_totals = counts.sum(axis=1, keepdims=True)\n';
+    const eager = await run(page, 'counts = np.asarray(counts)\n' + totals + 'shares = np.where(row_totals != 0, counts / row_totals, 0)');
+    assert.equal(eager.checkpoint.complete, false);
+    assert.match(eager.output.summary, /Division evaluated a zero row total/);
+    const inPlace = await run(page, totals + 'shares = counts.copy()\nshares[:] /= row_totals\nshares = np.nan_to_num(shares)');
+    assert.equal(inPlace.checkpoint.complete, false);
+    assert.match(inPlace.output.summary, /Division evaluated a zero row total/);
+    for (const source of [
+      'shares = counts / np.where(row_totals == 0, 1, row_totals)',
+      'shares = counts.copy()\nshares[:] /= np.where(row_totals == 0, 1, row_totals)',
+      'active = row_totals[:, 0] != 0\nshares = np.zeros_like(counts)\nshares[active] = counts[active] / row_totals[active]',
+    ]) assert.equal((await run(page, totals + source)).runStatus, 'success');
+  }
+  const after = await run(page, solutions[checkpoint.id]);
+  assert.equal(after.runStatus, 'success', checkpoint.id + ': ' + after.output.summary);
+  assert.ok(after.checkpoint.complete, checkpoint.id + ': no clear recorded');
+  assert.equal(after.progress.checksPassing, after.progress.totalChecks, checkpoint.id);
+  return after;
 }
 
-async function main() {
-  const { server, origin } = await startServer(rootDir);
-  const consoleErrors = [];
-  const pageErrors = [];
-  const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1400 } });
+async function next(page) {
+  await page.locator('#next-btn').click();
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'mission-title');
+}
 
-  page.on("console", (message) => {
-    if (message.type() === "error") {
-      consoleErrors.push(message.text());
-    }
-  });
-  page.on("pageerror", (error) => {
-    pageErrors.push(String(error));
-  });
+async function checkBoundary(page, control) {
+  assert.equal(await control.evaluate(node => node === document.activeElement), true);
+  assert.equal(await control.getAttribute('aria-disabled'), 'true');
+  const before = (await getState(page)).activeValue?.preview?.selection;
+  await page.keyboard.press('Enter');
+  assert.deepEqual((await getState(page)).activeValue?.preview?.selection, before);
+}
 
+async function checkResetRace(browser) {
+  const context = await browser.newContext();
   try {
-    await page.goto(origin, { waitUntil: "domcontentloaded" });
-    await waitForReady(page);
+    const owner = await context.newPage();
+    await owner.goto(site.url);
+    await ready(owner);
+    await run(owner, solutions[campaign[0].id]);
+    await next(owner);
+    await owner.locator('#settings-button').click();
+    await owner.locator('#plain-setting').check();
+    await owner.locator('#new-game').click();
+    await owner.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
+    const peer = await context.newPage();
+    await peer.goto(site.url);
+    await ready(peer);
+    assert.equal((await getState(peer)).checkpoint.id, campaign[1].id);
+    // Hold the lock so the reset is queued first, then enqueue a stale draft and run.
+    await peer.evaluate(() => new Promise(held => {
+      void navigator.locks.request('numpy-nebula-save', () => new Promise(release => {
+        window.releaseSaveLock = release;
+        held();
+      }));
+    }));
+    await owner.bringToFront();
+    await owner.locator('#confirm-action').click();
+    assert.equal((await getState(owner)).checkpoint.id, campaign[0].id);
+    await owner.waitForFunction(async () => (await navigator.locks.query()).pending
+      .some(lock => lock.name === 'numpy-nebula-save'), null, {polling: 50});
+    await peer.bringToFront();
+    await editor(peer).fill('import time\ntime.sleep(1)\n' + solutions[campaign[1].id]);
+    await editor(peer).press('Control+Enter');
+    await peer.getByText('Running Python…', {exact: true}).waitFor();
+    await peer.evaluate(() => window.releaseSaveLock());
+    await owner.bringToFront();
+    // Observe the owner's actual write before checking delivery to the peer.
+    await owner.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
+    const reset = await owner.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
+    assert.equal(reset.generation, 1, 'The owner must commit the reset while a stale draft is queued');
+    assert.deepEqual(reset.completed, {});
+    await peer.bringToFront();
+    await peer.waitForFunction(() => JSON.parse(window.render_game_to_text()).checkpoint.id === 'boot-power-core',
+      null, {polling: 50});
+    await ready(peer);
+    for (const tab of [owner, peer]) {
+      await tab.reload();
+      await ready(tab);
+      const saved = await tab.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
+      assert.deepEqual(saved.completed, {});
+      assert.deepEqual(saved.drafts, {});
+      assert.equal(saved.settings.plain, true);
+      assert.equal((await getState(tab)).checkpoint.id, campaign[0].id);
+    }
+  } finally {
+    await context.close();
+  }
+}
 
-    const initialState = await getState(page);
-    assert.equal(initialState.mission.id, "boot-bay");
-    assert.equal(typeof initialState.engineStatus, "string");
-    assert.ok(initialState.arrays.length > 0, "Initial auto-run should populate arrays");
-    assert.equal(await page.evaluate(() => typeof window.advanceTime), "function");
-    assert.equal(await page.evaluate(() => typeof window.render_game_to_text), "function");
+async function checkLayout(page, width, height, label) {
+  await page.setViewportSize({width, height});
+  const entry = await editor(page).boundingBox();
+  const controls = await runButton(page).boundingBox();
+  const pageWidth = await page.evaluate(() => document.documentElement.scrollWidth);
+  assert.equal(pageWidth, width, label + ' page has horizontal overflow');
+  assert.ok(entry?.height > 80 && controls?.height > 30, label + ' editor and Run are visible');
+  assert.ok(Math.abs(entry.y - controls.y) < 140, label + ' Run is separated from the editor');
+}
 
-    const advancedMission = await page.evaluate(() => {
-      window.advanceTime(750);
-      return JSON.parse(window.render_game_to_text()).mission.id;
+function listen(page) {
+  const errors = [];
+  page.on('pageerror', error => errors.push(error.message));
+  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  return errors;
+}
+
+async function play(name) {
+  assert.ok(browsers[name], 'Unknown NEBULA_BROWSER ' + name);
+  const browser = await browsers[name].launch();
+  try {
+    const context = await browser.newContext({viewport: {width: 1440, height: 900}, reducedMotion: 'reduce'});
+    const page = await context.newPage();
+    const errors = listen(page);
+    const external = [];
+    const loaded = new Set();
+    context.on('response', response => {
+      if (response.ok()) loaded.add(new URL(response.url()).pathname);
     });
-    assert.equal(advancedMission, "boot-bay", "advanceTime should not break mission state");
+    context.on('request', request => {
+      if (request.url().startsWith('http') && !request.url().startsWith(site.url)) external.push(request.url());
+    });
+    await page.goto(site.url);
+    await ready(page);
+    assert.equal(new URL(page.url()).pathname, '/numpy_game_b/');
+    const initial = await getState(page);
+    assert.equal(initial.checkpoint.id, 'boot-power-core');
+    assert.ok(!initial.progress.labUnlocked && !initial.progress.nebulaUnlocked);
+    assert.equal(await page.evaluate(() => typeof window.advanceTime), 'function');
+    assert.equal(await page.locator('[data-mode="lab"]').isDisabled(), true);
+    if (name === 'chromium') {
+      for (const [width, height] of [[1440,900],[1240,850],[1024,768],[768,1024],[390,844],[320,640]]) {
+        await page.setViewportSize({width, height});
+        await page.reload();
+        await ready(page);
+        await page.evaluate(() => document.fonts.ready);
+        await checkLayout(page, width, height, String(width));
+        const art = await page.locator('#ship-canvas').boundingBox();
+        const copy = await page.locator('.hero-copy').boundingBox();
+        assert.ok(art.height > 40 && (copy.y + copy.height <= art.y + 1 || copy.x + copy.width <= art.x + 1), 'Hero overlaps at ' + width);
+        if (width === 1024) assert.ok((await editor(page).boundingBox()).y < height - 46, 'First two lines in view');
+        assert.equal(await page.getByRole('button', {name:'Fullscreen ship view', includeHidden:true}).locator('svg').count(), 1);
+        assert.match(await page.locator('#setup-details summary').innerText(), /power_shape.*power_dtype/);
+        await capture(page, 'reflow-' + width);
+      }
+      // A 1440px desktop at 200% zoom has a 720px CSS layout viewport.
+      await checkLayout(page, 720, 450, '200% zoom equivalent layout');
+      await capture(page, 'reflow-200-equivalent');
+      await page.setViewportSize({width: 1440, height: 900});
+      await editor(page).focus();
+      await page.keyboard.press('Tab');
+      assert.equal(await page.evaluate(() => document.activeElement.closest('#code-editor') === null), true);
+      await page.locator('#hint-details summary').click();
+      await page.locator('#hint-btn').click();
+      assert.equal((await getState(page)).hintsVisible, 1);
+      await page.locator('#prediction summary').click();
+      await page.locator('#prediction-options input').nth(1).check();
+      await page.getByRole('button',{name:'Check prediction'}).click();
+      assert.match(await page.locator('#prediction-feedback').innerText(), /^Correct/);
+      await page.locator('#prediction summary').click();
+      await page.locator('#hint-details summary').click();
+    }
 
-    await waitForMissionReady(page, solutions[0].id);
-    await runCurrentMission(page, solutions[0]);
-    assert.equal(await page.getByRole("button", { name: "Next Sector" }).isEnabled(), true);
+    const invalid = await run(page, 'power_core = np.zeros(', name === 'chromium');
+    assert.equal(invalid.runStatus, 'error');
+    assert.match(invalid.output.summary, /SyntaxError on line 1/);
+    if (name === 'chromium') await capture(page, 'python-error');
 
-    await page.getByRole("button", { name: "Reset Mission" }).click();
-    await page.waitForFunction(() => {
-      const state = JSON.parse(window.render_game_to_text());
-      return state.mission.id === "boot-bay" && state.mission.complete === false;
-    }, { timeout: 15000 });
-    const resetState = await getState(page);
-    assert.equal(resetState.mission.complete, false, "Reset should return Boot Bay to incomplete state");
+    for (const width of name === 'chromium' ? [390, 1024, 1440] : [1440]) {
+      const height = width === 390 ? 844 : width === 1024 ? 768 : 900;
+      await page.setViewportSize({width, height});
+      const wrong = await run(page, 'power_core = np.ones(power_shape, dtype=power_dtype)');
+      assert.match(wrong.output.summary, /Every power cell starts at zero.*Choose the zero-filled creation function/s);
+      if (name === 'chromium') await capture(page, 'failed-check-' + width);
+      if (width < 1121) {
+        await page.locator('#map-button').press('Enter');
+        await page.keyboard.press('Tab');
+        await page.keyboard.press('Escape');
+        assert.equal(await page.locator('#map-button').getAttribute('aria-expanded'), 'false');
+        assert.equal(await page.evaluate(() => document.activeElement.id), 'map-button');
+      }
+    }
+    const hardcoded = await run(page,
+      '# np.zeros(power_shape, dtype=power_dtype)\npower_core = np.zeros((3, 4), dtype=np.float64)');
+    assert.equal(hardcoded.checkpoint.complete, false);
+    assert.match(hardcoded.output.summary, /visible sample passed/i);
+    assert.match(await page.locator('#validation-list').innerText(), /visible sample passed/i);
+    if (name === 'chromium') {
+      await editor(page).fill('import time\ntime.sleep(0.5)\npower_core = np.zeros(power_shape, dtype=power_dtype)');
+      await runButton(page).click();
+      await page.getByText('Running Python…', {exact: true}).waitFor();
+      await editor(page).fill('# changed while the worker was running');
+      await page.getByText('Last run shown. Your draft has changed.', {exact: true}).waitFor();
+      assert.equal((await getState(page)).checkpoint.complete, false);
+    }
+    await checkResetRace(browser);
+    const peer = await context.newPage();
+    await peer.goto(site.url);
+    await ready(peer);
+    const equivalent = await run(page, [
+      'import warnings',
+      'assert np.get_printoptions()["precision"] == 8',
+      'warnings.warn("fresh fixture")',
+      'warnings.simplefilter("error", UserWarning)',
+      'np.set_printoptions(precision=1)',
+      'power_core = np.full(power_shape, 0, dtype=power_dtype)',
+    ].join('\n'), true);
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'next-btn');
+    assert.equal(equivalent.checkpoint.complete, true);
+    if (name === 'chromium') {
+      for (const [width, height] of [[390, 844], [1024, 768], [1440, 900]]) {
+        await page.setViewportSize({width, height});
+        await page.evaluate(() => window.scrollTo(0, 0));
+        const advance = page.locator('#next-btn');
+        const box = await advance.boundingBox();
+        const code = await page.locator('#code-editor').boundingBox();
+        assert.ok(box.y >= 0 && box.y + box.height <= Math.min(height, code.y), 'Advance is visible above the editor at ' + width);
+        assert.equal(await advance.evaluate(node => getComputedStyle(node).fontFamily),
+          await runButton(page).evaluate(node => getComputedStyle(node).fontFamily));
+        await capture(page, 'advance-' + width);
+      }
+    }
+    const core = await inspect(page, 'power_core');
+    assert.deepEqual(core.cells.map(row => row.length), [4,4,4]);
+    if (name === 'chromium') await capture(page,'boot-restored');
+    await editor(page).fill('# saved edit after a successful run');
+    const stale = await getState(page);
+    assert.equal(stale.lastRunMatchesDraft, false);
+    assert.match(stale.output.summary, /Last run shown/);
+    const idle = stale.shipDraws;
+    await page.waitForTimeout(160);
+    assert.equal((await getState(page)).shipDraws, idle);
+    await page.reload();
+    await ready(page);
+    assert.equal((await getState(page)).checkpoint.complete, true);
+    assert.match(await draftText(page), /saved edit/);
+    await next(page);
+    assert.match(await page.locator('#setup-details summary').innerText(), /low, high, sample_count/);
+    await clear(page, campaign[1]);
+    const peerDraft = '# edited from a second tab opened before the clear';
+    await editor(peer).fill(peerDraft);
+    await peer.waitForFunction(draft => {
+      const save = JSON.parse(localStorage.getItem('numpy-nebula-save'));
+      return save?.drafts['boot-power-core'] === draft;
+    }, peerDraft);
+    await peer.locator('#reset-btn').click();
+    await peer.getByRole('dialog', {name:'Reset this draft?'}).getByRole('button', {name:'Reset draft'}).click();
+    await peer.waitForFunction(() => {
+      const save = JSON.parse(localStorage.getItem('numpy-nebula-save'));
+      return save && !Object.hasOwn(save.drafts, 'boot-power-core');
+    });
+    await peer.close();
+    await page.reload();
+    await ready(page);
+    const afterPeer = await getState(page);
+    assert.equal(afterPeer.checkpoint.id, campaign[1].id, 'Peer draft operations must preserve the active checkpoint');
+    assert.equal(afterPeer.progress.labUnlocked, true, 'Peer draft operations must preserve both Boot Bay clears');
+    const calibrationDraft = await page.evaluate(id =>
+      JSON.parse(localStorage.getItem('numpy-nebula-save')).drafts[id], campaign[1].id);
+    assert.equal(calibrationDraft, solutions[campaign[1].id], 'Peer reset must preserve the other workspace draft');
+    await run(page, solutions[campaign[1].id]);
+    const vector = await inspect(page, 'course_line');
+    assert.equal(vector.cells[0][0].index, '[0]');
+    assert.equal((await getState(page)).progress.labUnlocked, true);
 
-    await waitForMissionReady(page, solutions[0].id);
-    await runCurrentMission(page, solutions[0]);
-    await page.getByRole("button", { name: "Next Sector" }).click();
+    await page.locator('[data-mode="lab"]').click();
+    const probe = [
+      'tall = np.arange(40).reshape(20, 2)',
+      'vector = np.arange(40)',
+      'wide = np.arange(64).reshape(2, 32)',
+      'rank4 = np.arange(24).reshape(2, 2, 2, 3)',
+      'empty = np.zeros((0, 2))',
+      'complex_values = np.array([1+2j, np.inf, np.nan])',
+      'scalar = np.array(2.5)',
+      'mask = np.array([True, False])',
+      "large_dtype = np.zeros(1, dtype=[('x' * 200000, 'i1')])",
+      "globals()['x' * 200000] = np.array([1])",
+      "print('é' * 20000)",
+    ].join('\n');
+    for (const ending of ['', '\nraise ValueError("test cleanup")']) {
+      await run(page, 'import warnings\nnp.set_printoptions(precision=1)\nwarnings.simplefilter("error", UserWarning)' + ending);
+      const clean = await run(page, 'import warnings\nwarnings.warn("still a warning")\nprint(np.array([1/3]))');
+      assert.equal(clean.runStatus, 'success');
+      assert.equal(clean.output.stdout.trim(), '[0.33333333]');
+      assert.match(await page.locator('#stderr-pane').textContent(), /UserWarning: still a warning/);
+    }
+    const lab = await run(page, probe);
+    assert.equal(lab.phase, 'lab');
+    assert.equal(lab.runStatus, 'success');
+    assert.ok(lab.arrays.every(output => output.name.length <= 128));
+    assert.ok(lab.arrays.find(output => output.name === 'large_dtype').dtype.length <= 160);
+    assert.ok(Buffer.byteLength(lab.output.stdout, 'utf8') <= 32768);
+    assert.match(await page.locator('#stdout-pane').textContent(), /Output truncated at 32 KiB/);
+    await page.setViewportSize({width: 390,height: 844});
+    const wide = await inspect(page, 'wide');
+    assert.equal(wide.cells[0].length, 16);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth), 390);
+    const nextColumn = page.getByRole('button', {name: 'Next columns'});
+    await nextColumn.press('Enter');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 16);
+    await checkBoundary(page, nextColumn);
+    const previousColumn = page.getByRole('button', {name: 'Previous columns'});
+    await previousColumn.press('Enter');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 0);
+    await checkBoundary(page, previousColumn);
+    await inspect(page, 'vector');
+    await nextColumn.press('Enter');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 16);
+    await nextColumn.press('Enter');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.col === 32);
+    await checkBoundary(page, nextColumn);
+    await inspect(page, 'tall');
+    for (const [label, row] of [['Next rows', 16], ['Previous rows', 0]]) {
+      const control = page.getByRole('button', {name: label});
+      await control.press('Enter');
+      await page.waitForFunction(row => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.row === row, row);
+      await checkBoundary(page, control);
+    }
+    const rank4 = await inspect(page, 'rank4');
+    assert.equal(rank4.cells[0][0].index, '[0, 0, 0, 0]');
+    const axis = page.getByLabel('Axis 0', {exact: true});
+    await axis.fill('1');
+    await axis.press('Tab');
+    await page.waitForFunction(() => JSON.parse(window.render_game_to_text()).activeValue?.preview?.selection.axes[0] === 1);
+    assert.match((await inspect(page, 'empty')).text, /empty/);
+    assert.match((await inspect(page, 'complex_values')).cells[0][0].value, /1\+2j/);
+    assert.equal((await inspect(page, 'scalar')).text, '2.5');
+    assert.equal((await inspect(page, 'mask')).cells[0][1].value, 'False');
+    await page.locator('#dataset-select').selectOption(labDatasets[1].id);
+    assert.equal((await getState(page)).checkpoint.id, 'lab:' + labDatasets[1].id);
+    await page.locator('#dataset-select').selectOption(labDatasets[0].id);
+    assert.match(await draftText(page), /rank4/);
 
-    for (let index = 1; index < solutions.length; index += 1) {
-      const mission = solutions[index];
-      await waitForMissionReady(page, mission.id);
-      await runCurrentMission(page, mission);
+    await editor(page).fill('while True:\n    pass');
+    await runButton(page).press('Enter');
+    await page.getByText('Running Python…', {exact:true}).waitFor();
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'run-btn');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'stop-btn');
+    await page.keyboard.press('Enter');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'run-btn');
+    assert.match(await page.locator('#run-summary').textContent(), /Run stopped/);
+    await ready(page);
+    const recovered = await run(page, "output = np.array([4, 5])\nprint('recovered')");
+    assert.equal(recovered.output.stdout.trim(), 'recovered');
+    if (name === 'chromium') {
+      await editor(page).fill('while True:\n    pass');
+      await runButton(page).click();
+      await page.getByText(/Time limit reached after 10 seconds/).waitFor({timeout: 16000});
+      await ready(page);
+      await capture(page,'mobile-lab');
+    }
 
-      if (index < solutions.length - 1) {
-        await page.getByRole("button", { name: "Next Sector" }).click();
+    await page.locator('[data-mode="campaign"]').click();
+    assert.equal((await getState(page)).checkpoint.id, campaign[1].id);
+    await page.setViewportSize({width: 1440,height: 900});
+    for (const checkpoint of campaign.slice(2)) {
+      await next(page);
+      if (checkpoint.id === 'sensor-panel-reading') {
+        const original = solutions[checkpoint.id];
+        const rewritten = await run(page, 'sensor_grid[:] = 0\n' + original);
+        assert.equal(rewritten.checkpoint.complete, false, 'Replacing telemetry cannot complete a read-only lesson');
+        const alternative = await run(page, original.replace('sensor_grid[0]', 'sensor_grid[0, :]')
+          .replace('sensor_grid[priority_rows, priority_cols]', 'sensor_grid[(priority_rows, priority_cols)]'));
+        assert.equal(alternative.checkpoint.complete, true, 'Equivalent paired indexing should pass');
+      }
+      if (checkpoint.id === 'sensor-view-snapshot') {
+        const wrongView = await run(page, [
+          'snapshot = sensor_grid.copy()',
+          'view_patch = sensor_grid[:, 2:4]',
+          'sensor_grid[:, 1:3] += delta',
+        ].join('\n'));
+        assert.equal(wrongView.checkpoint.complete, false, 'A view of the wrong columns cannot pass');
+        const copiedView = await run(page, [
+          'snapshot = sensor_grid.copy()',
+          'view_patch = sensor_grid[:, 1:3].copy()',
+          'sensor_grid[:, 1:3] += delta',
+        ].join('\n'));
+        assert.equal(copiedView.checkpoint.complete, false, 'A copy cannot pass a view check');
+      }
+      await clear(page, checkpoint);
+    }
+    const restored = await getState(page);
+    assert.equal(restored.progress.completed.length,7);
+    assert.equal(restored.progress.nebulaUnlocked,true);
+    await page.locator('#next-btn').click();
+    await page.getByRole('dialog', {name:'Colony ship restored'}).waitFor();
+    if (name === 'chromium') await capture(page, 'campaign-ending');
+    await page.getByRole('button',{name:'Enter Nebula Mode'}).click();
+    for (const [index, challenge] of challenges.entries()) {
+      if (index) await next(page);
+      await clear(page, challenge);
+    }
+    await page.locator('#next-btn').click();
+    const log = page.getByRole('dialog',{name:'Ship Log'});
+    await log.waitFor();
+    assert.equal(await log.locator('article').count(), 14);
+    if (name === 'chromium') await capture(page, 'ship-log');
+    await log.getByRole('button',{name:'Close',exact:true}).click();
+    await page.getByRole('button',{name:'Settings',exact:true}).click();
+    const settings = page.getByRole('dialog',{name:'Settings'});
+    await settings.getByLabel('Plain-text editor').check();
+    await settings.getByRole('button',{name:'Close',exact:true}).click();
+    assert.equal(await editor(page).evaluate(node => node.tagName), 'TEXTAREA');
+    const beforeReset = await getState(page);
+    await page.locator('#reset-btn').click();
+    await page.getByRole('dialog',{name:'Reset this draft?'}).getByRole('button',{name:'Reset draft'}).click();
+    assert.deepEqual((await getState(page)).progress.checkpoints,beforeReset.progress.checkpoints);
+    await page.getByRole('button',{name:'Settings',exact:true}).click();
+    await settings.getByRole('button',{name:'Start over'}).click();
+    await page.getByRole('dialog',{name:'Start over?'}).getByRole('button',{name:'Start over'}).click();
+    assert.equal((await getState(page)).progress.completed.length,0);
+    await editor(page).focus();
+    await editor(page).press('Shift');
+    assert.equal(await editor(page).evaluate(node => getComputedStyle(node).outlineWidth), '2px');
+    assert.equal((await run(page, solutions[campaign[0].id], true)).runStatus, 'success');
+    await page.keyboard.press('Tab');
+    assert.equal(await page.evaluate(() => document.activeElement.id), 'next-btn');
+    assert.deepEqual(errors,[]);
+    assert.deepEqual(external,[]);
+    if (name === 'chromium') {
+      for (const pattern of [/python-worker-.*\.js$/, /pyodide\.mjs$/, /\.wasm(?:\.gz)?$/, /numpy-.*\.whl$/,
+        /rich-editor-.*\.js$/, /\.woff2$/, /ship-cutaway\.webp$/]) {
+        assert.ok([...loaded].some(path => pattern.test(path)), 'Missing production asset ' + pattern);
       }
     }
 
-    const finalState = await getState(page);
-    assert.equal(finalState.mission.id, "colony-core");
-    assert.equal(finalState.mission.complete, true);
-    assert.equal(finalState.progress.completed.length, 7, "All seven missions should be complete");
-    assert.equal(finalState.progress.unlockedCount, 7);
+    if (name === 'chromium') {
+      const offline = await browser.newPage({viewport:{width:390,height:844}, hasTouch:true, isMobile:true});
+      await offline.addInitScript(() => {
+        Object.defineProperty(window, 'localStorage', {get() {throw Error('Storage denied for test');}});
+      });
+      const block = '**/runtime/0.26.3/pyodide.mjs';
+      await offline.route(block, route => route.abort());
+      await offline.goto(site.url);
+      await offline.getByText('Runtime offline',{exact:true}).waitFor();
+      assert.ok(await offline.locator('#storage-notice').isVisible());
+      const fallbackEditor = offline.locator('#code-editor textarea');
+      await fallbackEditor.focus();
+      await fallbackEditor.press('Shift');
+      assert.equal(await fallbackEditor.evaluate(node => getComputedStyle(node).outlineWidth), '2px');
+      await offline.unroute(block);
+      await offline.getByRole('button',{name:'Retry engine'}).tap();
+      await ready(offline);
+      await clear(offline,campaign[0]);
+      assert.equal((await getState(offline)).checkpoint.complete,true);
 
-    if (pageErrors.length) {
-      throw new Error(`Page errors detected:\n${pageErrors.join("\n")}`);
-    }
-    if (consoleErrors.length) {
-      throw new Error(`Console errors detected:\n${consoleErrors.join("\n")}`);
+      // A temporary quota error during Start over must not strand subsequent saves.
+      await page.evaluate(() => {
+        const write = Storage.prototype.setItem;
+        Storage.prototype.setItem = function(key, value) {
+          if (key === 'numpy-nebula-save') throw new DOMException('Full', 'QuotaExceededError');
+          return write.call(this, key, value);
+        };
+        window.restoreStorage = () => { Storage.prototype.setItem = write; };
+      });
+      await page.locator('#settings-button').click();
+      await page.locator('#new-game').click();
+      await page.locator('#confirm-action').click();
+      await page.locator('#storage-notice').waitFor();
+      await page.evaluate(() => window.restoreStorage());
+      await editor(page).fill('# draft after recovery');
+      await page.locator('#storage-notice').waitFor({state:'hidden'});
+      await page.reload();
+      await ready(page);
+      assert.deepEqual((await getState(page)).progress.checkpoints, []);
+      assert.equal(await draftText(page), '# draft after recovery');
     }
 
-    console.log("Regression check passed: startup, hooks, reset flow, progression, and all seven mission solutions verified.");
-  } catch (error) {
-    const screenshotPath = path.join(rootDir, "output", "regression-failure.png");
-    fs.mkdirSync(path.dirname(screenshotPath), { recursive: true });
-    await page.screenshot({ path: screenshotPath, fullPage: true });
-    throw error;
+    console.log(name + ' passed: production subpath, all 15 campaign checkpoints and seven challenges, Lab, worker stop/recovery, inspector, save/reset, and console/network checks.');
   } finally {
-    await page.close();
     await browser.close();
-    await new Promise((resolve) => server.close(resolve));
   }
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+try {
+  for (const name of names) await play(name);
+} finally {
+  await site.close();
+}
