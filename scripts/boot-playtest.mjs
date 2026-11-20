@@ -33,7 +33,11 @@ try {
   await page.getByText('NumPy ready', {exact: true}).waitFor();
   const pyodideBoot = await page.evaluate(() => JSON.parse(window.render_game_to_text()).checkpoint.id);
   assert.equal(pyodideBoot, 'boot-power-core');
-  assert.ok((await editor.boundingBox()).y < 844);
+  // Enhancement can replace the textarea immediately after the worker becomes ready.
+  await page.waitForFunction(() => {
+    const box = document.querySelector('#code-editor [role="textbox"]')?.getBoundingClientRect();
+    return box && box.height > 0 && box.top < innerHeight && box.bottom > 0;
+  });
   assert.ok((await page.locator('#run-btn').boundingBox()).y < 844);
   await capture('touch-opening');
   await editor.fill('power_core = np.zeros(');

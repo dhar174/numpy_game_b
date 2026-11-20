@@ -52,7 +52,13 @@ async function capture(page, name) {
 }
 
 async function ready(page) {
-  await page.getByText('NumPy ready', {exact: true}).waitFor();
+  const status = page.locator('#engine-status');
+  try {
+    await page.locator('#engine-status:is([data-state="ready"], [data-state="failed"])').waitFor({timeout: 35000});
+    assert.equal(await status.textContent(), 'NumPy ready');
+  } catch (error) {
+    throw new Error('Runtime startup: ' + await status.textContent() + ' — ' + await page.locator('#run-summary').textContent(), {cause: error});
+  }
 }
 
 async function run(page, source, shortcut = false) {
