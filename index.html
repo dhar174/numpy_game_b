@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#0b101b">
     <meta name="description" content="Restore a colony ship by solving real Python and NumPy puzzles in your browser.">
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg">
     <title>NumPy Nebula — Restore the Colony Ship</title>
   </head>
   <body>
@@ -33,6 +34,7 @@
           </div>
         </div>
         <canvas id="ship-canvas" width="720" height="276" aria-hidden="true"></canvas>
+        <button id="exit-fullscreen" class="utility fullscreen-exit" type="button" hidden>Exit fullscreen</button>
       </section>
 
       <p class="storage-notice" id="storage-notice" role="status" hidden>Local storage is unavailable. Your progress is temporary in this tab.</p>
@@ -48,7 +50,7 @@
             </button>
           </div>
           <ol id="sector-list" class="sector-list"></ol>
-          <p class="map-key"><span aria-hidden="true">◆</span> Online <span aria-hidden="true">◇</span> Awaiting repair</p>
+          <p class="map-key"><span aria-hidden="true">◆</span> <span id="map-key-complete">Online</span> <span aria-hidden="true">01–07</span> <span id="map-key-pending">Awaiting repair</span></p>
         </aside>
 
         <section class="work-panel panel" aria-labelledby="mission-title">
