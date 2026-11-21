@@ -171,7 +171,7 @@ async function checkResetRace(browser) {
     assert.equal((await getState(peer)).checkpoint.id, campaign[1].id);
     // Hold the lock so the reset is queued first, then enqueue a stale draft and run.
     await peer.evaluate(() => new Promise(held => {
-      void navigator.locks.request('numpy-nebula-save', () => new Promise(release => {
+      window.heldSaveLock = navigator.locks.request('numpy-nebula-save', () => new Promise(release => {
         window.releaseSaveLock = release;
         held();
       }));
@@ -185,7 +185,12 @@ async function checkResetRace(browser) {
     await editor(peer).fill('import time\ntime.sleep(1)\n' + solutions[campaign[1].id]);
     await editor(peer).press('Control+Enter');
     await peer.getByText('Running Python…', {exact: true}).waitFor();
-    await peer.evaluate(() => window.releaseSaveLock());
+    // WebKit may suspend a background tab before its lock request settles.
+    // Keep the peer visible until the holder has actually released the lock.
+    await peer.evaluate(async () => {
+      window.releaseSaveLock();
+      await window.heldSaveLock;
+    });
     await owner.bringToFront();
     // A resumed WebKit tab can observe the lock becoming available before its
     // queued callback runs. Wait for the reset itself, not only a later lock.
