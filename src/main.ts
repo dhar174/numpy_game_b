@@ -275,6 +275,8 @@ function refreshNavigation() {
     control.disabled = !game.checkpointUnlocked(checkpoint);
   });
   get('progress-status').textContent = restored.length + ' / ' + sectors.length + ' systems online';
+  get('map-key-complete').textContent = game.save.mode === 'nebula' ? 'Cleared' : 'Online';
+  get('map-key-pending').textContent = game.save.mode === 'nebula' ? 'Not yet cleared' : 'Awaiting repair';
   for (const [index, room] of rooms.entries()) {
     const online = game.save.mode === 'nebula' ? game.isComplete(room.sector.nebula.id) : restored.includes(room.sector);
     const unlocked = game.sectorUnlocked(room.sector);
@@ -500,16 +502,28 @@ document.addEventListener('keydown', event => {
     button('map-button').focus();
   }
 });
-button('fullscreen-button').hidden = !document.fullscreenEnabled;
-button('fullscreen-button').addEventListener('click', async () => {
+const fullscreenButton = button('fullscreen-button');
+const exitFullscreenButton = button('exit-fullscreen');
+const fullscreenView = get('ship-canvas').parentElement!;
+fullscreenButton.hidden = !document.fullscreenEnabled;
+document.addEventListener('fullscreenchange', () => {
+  const exitHadFocus = document.activeElement === exitFullscreenButton;
+  const active = document.fullscreenElement === fullscreenView;
+  exitFullscreenButton.hidden = !active;
+  if (active) exitFullscreenButton.focus();
+  else if (exitHadFocus && !fullscreenButton.hidden) fullscreenButton.focus();
+});
+async function toggleFullscreen() {
   try {
     if (document.fullscreenElement) await document.exitFullscreen();
-    else await get('ship-canvas').parentElement?.requestFullscreen();
+    else await fullscreenView.requestFullscreen();
   } catch {
     engineNote = 'Fullscreen is unavailable in this browser.';
     syncControls();
   }
-});
+}
+fullscreenButton.addEventListener('click', toggleFullscreen);
+exitFullscreenButton.addEventListener('click', toggleFullscreen);
 document.querySelectorAll<HTMLButtonElement>('[data-close]').forEach(control => {
   control.addEventListener('click', () => control.closest('dialog')?.close());
 });

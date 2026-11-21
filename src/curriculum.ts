@@ -273,7 +273,7 @@ export const sectors: Sector[] = [
         id: "reactor-broadcast-wave",
         sectorId: "reactor-garden",
         title: "Broadcast Bloom",
-        objective: "Broadcast a lane bias across the reactor rows and derive wave, efficiency, log, and danger arrays.",
+        objective: "Broadcast a lane bias across root_heat. Set efficiency to np.exp(-boosted / 10) and log_signal to np.log1p(boosted), then derive wave and danger arrays.",
         skill: "Broadcasting, ufunc chains, and comparisons",
         setup: py(
           "heat = np.array([[1.0, -4.0, 9.0], [16.0, -25.0, 36.0]])",
@@ -304,7 +304,7 @@ export const sectors: Sector[] = [
         checks: [
           check("Wave applies sine to the root readings", "bool(np.allclose(wave, np.sin(np.sqrt(np.abs(__initial['heat'])))))", "Use the sine ufunc on root_heat."),
           check("Bias is broadcast across every reactor row", "bool(np.allclose(boosted, np.sqrt(np.abs(__initial['heat'])) + __initial['bias']))", "The 1D bias matches the last axis."),
-          check("Efficiency and log signal use the requested transforms", "bool(np.allclose(efficiency, np.exp(-boosted / 10))) and bool(np.allclose(log_signal, np.log1p(boosted)))", "Build both arrays from boosted."),
+          check("Efficiency and log signal use the requested transforms", "bool(np.allclose(efficiency, np.exp(-boosted / 10))) and bool(np.allclose(log_signal, np.log1p(boosted)))", "Use np.exp(-boosted / 10) for efficiency and np.log1p(boosted) for log_signal."),
           check("Danger mask marks values above danger_limit", "bool(np.array_equal(danger, boosted > __initial['danger_limit']))", "Compare the adjusted values."),
         ],
       }),
@@ -313,11 +313,11 @@ export const sectors: Sector[] = [
       id: "nebula-column-normalizer",
       sectorId: "reactor-garden",
       title: "Column Normalizer",
-      objective: "Center each sensor lane by its column mean and measure the remaining energy.",
+      objective: "Center each sensor lane by its column mean, keeping the mean's row axis (shape 1 by number of columns), and measure the remaining energy.",
       skill: "Axis reductions, keepdims, and broadcasting",
       setup: py("signal = np.array([[2.0, 5.0, 9.0], [4.0, 7.0, 3.0], [6.0, 8.0, 6.0]])"),
       alternate: py("signal = np.array([[10.0, -2.0], [4.0, 6.0], [1.0, 8.0], [5.0, 0.0]])"),
-      starter: py("# Find one mean per column, center readings, then sum squared deviation by lane.", "column_mean = None", "centered = None", "column_energy = None"),
+      starter: py("# Keep a one-row column mean, center readings, then sum squared deviation by lane.", "column_mean = None", "centered = None", "column_energy = None"),
       hints: [
         "A column mean is one summary value for each lane, so the reduced result should keep a row axis for broadcasting.",
         "For a 3 by 2 table, mean(axis=0, keepdims=True) returns a 1 by 2 row that can be subtracted from all three rows.",
@@ -666,7 +666,7 @@ export const sectors: Sector[] = [
       id: "nebula-energy-drift",
       sectorId: "colony-core",
       title: "Energy Drift Report",
-      objective: "Measure changes between neighboring columns, accumulate power by row, and clamp the running total.",
+      objective: "Measure changes between neighboring columns, accumulate power down the rows for each column (axis 0), and clamp the running total.",
       skill: "diff, cumulative sums, axis, and clipping",
       setup: py(
         "energy = np.array([[2.0, 5.0, 4.0, 8.0], [1.0, 3.0, 7.0, 6.0], [4.0, 4.0, 9.0, 10.0]])",
@@ -676,7 +676,7 @@ export const sectors: Sector[] = [
         "energy = np.array([[10.0, 8.0, 11.0], [5.0, 9.0, 4.0], [2.0, 12.0, 6.0], [7.0, 7.0, 13.0]])",
         "lower, upper = 5.0, 30.0",
       ),
-      starter: py("# Compare neighboring columns and clamp accumulated row power.", "step_change = None", "accumulated = None", "clipped = None"),
+      starter: py("# Compare neighboring columns; accumulate down rows (axis 0), then clamp.", "step_change = None", "accumulated = None", "clipped = None"),
       hints: [
         "np.diff reports the change between neighboring readings, while cumsum keeps a running total.",
         "For a separate energy row [3, 5, 2], diff gives [2, -3]; cumsum on rows builds a running total down each column.",

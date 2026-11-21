@@ -76,6 +76,7 @@ pre { margin: 0; font: 400 .78rem/1.6 var(--mono); white-space: pre-wrap; overfl
 .hero:fullscreen .ship-links { inset: 0; width: 100%; }
 .hero:fullscreen { align-items: end; background: #0b1322; }
 .hero:fullscreen #ship-canvas { inset: 0; width: 100%; height: 100%; }
+.fullscreen-exit { position: absolute; z-index: 2; top: 16px; right: 16px; }
 .flight-status { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 8px; font: 400 .67rem/1.5 var(--mono); }
 .flight-status span { display: inline-flex; border: 1px solid #3b5365; padding: 4px 8px; border-radius: 3px; background: #101d2b; }
 #progress-status, #engine-status[data-state="ready"] { color: var(--mint); }
@@ -98,7 +99,7 @@ pre { margin: 0; font: 400 .78rem/1.6 var(--mono); white-space: pre-wrap; overfl
 .sector-num { aspect-ratio: 1; display: grid; place-items: center; color: var(--muted); background: #1d2b3c; font: 700 .67rem/1 var(--mono); border-radius: 2px; }
 .sector-button[data-state="restored"] .sector-num { background: #254941; color: var(--mint); }
 .map-key { padding: 8px 12px 13px; font-size: .73rem; color: var(--muted); }
-.map-key span { color: var(--mint); margin-inline: 3px 2px; }
+.map-key span[aria-hidden="true"] { color: var(--mint); margin-inline: 3px 2px; }
 .map-toggle { display: none; }
 
 .work-panel { padding: clamp(12px, 1.55vw, 22px); }

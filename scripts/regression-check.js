@@ -84,6 +84,24 @@ async function inspect(page, name) {
 async function clear(page, checkpoint) {
   const before = await getState(page);
   assert.equal(before.checkpoint.id, checkpoint.id);
+  if (checkpoint.id === 'reactor-broadcast-wave') {
+    assert.match(await page.locator('#mission-objective').innerText(), /np\.exp\(-boosted \/ 10\)/);
+    const wrongScale = await run(page, solutions[checkpoint.id].replace('np.exp(-boosted / 10)', 'np.exp(-boosted)'));
+    assert.equal(wrongScale.checkpoint.complete, false, 'A missing efficiency scale must not pass');
+    assert.match(wrongScale.output.summary, /np\.exp\(-boosted \/ 10\)/);
+  }
+  if (checkpoint.id === 'nebula-column-normalizer') {
+    assert.match(await page.locator('#mission-objective').innerText(), /row axis.*1 by number of columns/);
+    const collapsed = await run(page, solutions[checkpoint.id].replace('axis=0, keepdims=True', 'axis=0'));
+    assert.equal(collapsed.checkpoint.complete, false, 'The column mean must retain a row axis');
+    assert.match(collapsed.output.summary, /keep the dimension/i);
+  }
+  if (checkpoint.id === 'nebula-energy-drift') {
+    assert.match(await page.locator('#mission-objective').innerText(), /down the rows.*axis 0/);
+    const wrongAxis = await run(page, solutions[checkpoint.id].replace('np.cumsum(energy, axis=0)', 'np.cumsum(energy, axis=1)'));
+    assert.equal(wrongAxis.checkpoint.complete, false, 'Accumulating across columns must not pass');
+    assert.match(wrongAxis.output.summary, /axis 0/);
+  }
   if (Object.hasOwn(nearMisses, checkpoint.id)) {
     const rejected = await run(page, nearMisses[checkpoint.id]);
     assert.equal(rejected.runStatus, 'stale', checkpoint.id + ': expected review feedback for a wrong result');
@@ -153,7 +171,7 @@ async function checkResetRace(browser) {
     assert.equal((await getState(peer)).checkpoint.id, campaign[1].id);
     // Hold the lock so the reset is queued first, then enqueue a stale draft and run.
     await peer.evaluate(() => new Promise(held => {
-      void navigator.locks.request('numpy-nebula-save', () => new Promise(release => {
+      window.heldSaveLock = navigator.locks.request('numpy-nebula-save', () => new Promise(release => {
         window.releaseSaveLock = release;
         held();
       }));
@@ -167,9 +185,20 @@ async function checkResetRace(browser) {
     await editor(peer).fill('import time\ntime.sleep(1)\n' + solutions[campaign[1].id]);
     await editor(peer).press('Control+Enter');
     await peer.getByText('Running Python…', {exact: true}).waitFor();
-    await peer.evaluate(() => window.releaseSaveLock());
+    // WebKit may suspend a background tab before its lock request settles.
+    // Keep the peer visible until the holder has actually released the lock.
+    await peer.evaluate(async () => {
+      window.releaseSaveLock();
+      await window.heldSaveLock;
+    });
     await owner.bringToFront();
-    // Observe the owner's actual write before checking delivery to the peer.
+    // A resumed WebKit tab can observe the lock becoming available before its
+    // queued callback runs. Wait for the reset itself, not only a later lock.
+    await owner.waitForFunction(() => {
+      const save = JSON.parse(localStorage.getItem('numpy-nebula-save') ?? '{}');
+      return save.generation === 1;
+    }, null, {polling: 50});
+    // Drain writes before checking delivery to the peer.
     await owner.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
     const reset = await owner.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
     assert.equal(reset.generation, 1, 'The owner must commit the reset while a stale draft is queued');
@@ -205,13 +234,19 @@ async function checkLayout(page, width, height, label) {
 function listen(page) {
   const errors = [];
   page.on('pageerror', error => errors.push(error.message));
-  page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
+  page.on('console', message => {
+    if (message.type() === 'error') {
+      const url = message.location().url;
+      errors.push(message.text() + (url ? ' (' + url + ')' : ''));
+    }
+  });
   return errors;
 }
 
 async function play(name) {
   assert.ok(browsers[name], 'Unknown NEBULA_BROWSER ' + name);
-  const browser = await browsers[name].launch();
+  const channel = name === 'chromium' ? process.env.NEBULA_CHROMIUM_CHANNEL : undefined;
+  const browser = await browsers[name].launch(channel ? {channel} : {});
   try {
     const context = await browser.newContext({viewport: {width: 1440, height: 900}, reducedMotion: 'reduce'});
     const page = await context.newPage();
@@ -230,9 +265,32 @@ async function play(name) {
     const initial = await getState(page);
     assert.equal(initial.checkpoint.id, 'boot-power-core');
     assert.ok(!initial.progress.labUnlocked && !initial.progress.nebulaUnlocked);
+    assert.equal(await page.locator('#map-key-complete').innerText(), 'Online');
+    assert.equal(await page.locator('#map-key-pending').innerText(), 'Awaiting repair');
+    assert.equal(await page.locator('.map-key [aria-hidden="true"]').nth(1).innerText(), '01–07');
     assert.equal(await page.evaluate(() => typeof window.advanceTime), 'function');
     assert.equal(await page.locator('[data-mode="lab"]').isDisabled(), true);
     if (name === 'chromium') {
+      if (await page.evaluate(() => document.fullscreenEnabled)) {
+        await page.locator('#fullscreen-button').click();
+        await page.waitForFunction(() => document.fullscreenElement === document.querySelector('.hero'));
+        const exitFullscreen = page.getByRole('button', {name: 'Exit fullscreen'});
+        await exitFullscreen.waitFor({state: 'visible'});
+        await page.waitForFunction(() => document.activeElement.id === 'exit-fullscreen');
+        await exitFullscreen.click();
+        await page.waitForFunction(() => document.fullscreenElement === null);
+        await exitFullscreen.waitFor({state: 'hidden'});
+        await page.waitForFunction(() => document.activeElement.id === 'fullscreen-button');
+        await page.evaluate(() => {
+          const hero = document.querySelector('.hero');
+          hero.requestFullscreen = () => Promise.reject(new Error('Fullscreen denied for test'));
+        });
+        await page.locator('#fullscreen-button').click();
+        await page.getByText('Fullscreen is unavailable in this browser.', {exact: true}).waitFor();
+        await page.evaluate(() => { delete document.querySelector('.hero').requestFullscreen; });
+      } else {
+        assert.equal(await page.locator('#fullscreen-button').isHidden(), true);
+      }
       for (const [width, height] of [[1440,900],[1240,850],[1024,768],[768,1024],[390,844],[320,640]]) {
         await page.setViewportSize({width, height});
         await page.reload();
@@ -492,6 +550,14 @@ async function play(name) {
     await page.getByRole('dialog', {name:'Colony ship restored'}).waitFor();
     if (name === 'chromium') await capture(page, 'campaign-ending');
     await page.getByRole('button',{name:'Enter Nebula Mode'}).click();
+    assert.equal(await page.locator('#map-key-complete').innerText(), 'Cleared');
+    assert.equal(await page.locator('#map-key-pending').innerText(), 'Not yet cleared');
+    await page.locator('[data-mode="campaign"]').click();
+    assert.equal(await page.locator('#map-key-complete').innerText(), 'Online');
+    await page.locator('[data-mode="lab"]').click();
+    assert.equal(await page.locator('#map-key-pending').innerText(), 'Awaiting repair');
+    await page.locator('[data-mode="nebula"]').click();
+    assert.equal(await page.locator('#map-key-complete').innerText(), 'Cleared');
     for (const [index, challenge] of challenges.entries()) {
       if (index) await next(page);
       await clear(page, challenge);
