@@ -187,7 +187,13 @@ async function checkResetRace(browser) {
     await peer.getByText('Running Python…', {exact: true}).waitFor();
     await peer.evaluate(() => window.releaseSaveLock());
     await owner.bringToFront();
-    // Observe the owner's actual write before checking delivery to the peer.
+    // A resumed WebKit tab can observe the lock becoming available before its
+    // queued callback runs. Wait for the reset itself, not only a later lock.
+    await owner.waitForFunction(() => {
+      const save = JSON.parse(localStorage.getItem('numpy-nebula-save') ?? '{}');
+      return save.generation === 1;
+    }, null, {polling: 50});
+    // Drain writes before checking delivery to the peer.
     await owner.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
     const reset = await owner.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
     assert.equal(reset.generation, 1, 'The owner must commit the reset while a stale draft is queued');
