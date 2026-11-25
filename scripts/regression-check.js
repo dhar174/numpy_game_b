@@ -241,8 +241,8 @@ async function checkResetRace(browser) {
     await peer.goto(site.url);
     await ready(peer);
     assert.equal((await getState(peer)).checkpoint.id, campaign[1].id);
-    // Hold the lock so the reset is queued first, then enqueue a stale draft and run.
-    await peer.evaluate(() => new Promise(held => {
+    // Hold the lock in the owner so both writes can queue before it releases them.
+    await owner.evaluate(() => new Promise(held => {
       window.heldSaveLock = navigator.locks.request('numpy-nebula-save', () => new Promise(release => {
         window.releaseSaveLock = release;
         held();
@@ -257,32 +257,30 @@ async function checkResetRace(browser) {
     await editor(peer).fill('import time\ntime.sleep(1)\n' + solutions[campaign[1].id]);
     await editor(peer).press('Control+Enter');
     await peer.getByText('Running Python…', {exact: true}).waitFor();
-    // WebKit may suspend a background tab before its lock request settles.
-    // Keep the peer visible until the holder has actually released the lock.
-    await peer.evaluate(async () => {
+    await peer.waitForFunction(async () => (await navigator.locks.query()).pending
+      .filter(lock => lock.name === 'numpy-nebula-save').length >= 2, null, {polling: 50});
+    // Release the lock with the reset tab visible so WebKit can run its queued callback.
+    await owner.bringToFront();
+    await owner.evaluate(async () => {
       window.releaseSaveLock();
       await window.heldSaveLock;
     });
-    await owner.bringToFront();
-    // A resumed WebKit tab can observe the lock becoming available before its
-    // queued callback runs. Wait for the reset itself, not only a later lock.
-    await owner.waitForFunction(() => {
+    const reset = await owner.waitForFunction(() => {
       const save = JSON.parse(localStorage.getItem('numpy-nebula-save') ?? '{}');
-      return save.generation === 1;
+      return save.generation === 1 && save;
     }, null, {polling: 50});
-    // Drain writes before checking delivery to the peer.
-    await owner.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
-    const reset = await owner.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
-    assert.equal(reset.generation, 1, 'The owner must commit the reset while a stale draft is queued');
-    assert.deepEqual(reset.completed, {});
+    assert.deepEqual((await reset.jsonValue()).completed, {});
     await peer.bringToFront();
     await peer.waitForFunction(() => JSON.parse(window.render_game_to_text()).checkpoint.id === 'boot-power-core',
       null, {polling: 50});
     await ready(peer);
+    await peer.evaluate(() => navigator.locks.request('numpy-nebula-save', () => {}));
     for (const tab of [owner, peer]) {
+      await tab.bringToFront();
       await tab.reload();
       await ready(tab);
       const saved = await tab.evaluate(() => JSON.parse(localStorage.getItem('numpy-nebula-save')));
+      assert.equal(saved.generation, 1, 'The stored reset must survive the queued stale draft and run');
       assert.deepEqual(saved.completed, {});
       assert.deepEqual(saved.drafts, {});
       assert.equal(saved.settings.plain, true);
