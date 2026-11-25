@@ -1,3 +1,5 @@
+import type { CheckDefinition } from "./protocol";
+
 export interface Checkpoint {
   id: string;
   sectorId: string;
@@ -10,7 +12,7 @@ export interface Checkpoint {
   guardDivision?: boolean;
   hints: string[];
   prediction?: { question: string; options: string[]; answer: number; explanation: string };
-  checks: { label: string; expr: string; hint: string }[];
+  checks: CheckDefinition[];
 }
 
 export interface Sector {
@@ -33,6 +35,10 @@ const checkpoint = (data: Checkpoint): Checkpoint => data;
 const centeredSignal = "(__initial['signal'] - __initial['signal'].mean(axis=0, keepdims=True))";
 const trafficTotals = "__initial['counts'].sum(axis=1, keepdims=True)";
 const nonemptyTraffic = "(__initial['counts'].sum(axis=1) != 0)";
+const calibrationReportKeys = ["shape", "ndim", "size", "dtype"];
+const calibrationReportIsDict = "isinstance(globals().get('report'), dict)";
+const calibrationReportHasKeys = calibrationReportKeys.map(key => `'${key}' in report`);
+const calibrationReportDtype = "isinstance(report['dtype'], np.dtype)";
 
 const bootBay: Checkpoint[] = [
   checkpoint({
@@ -74,7 +80,7 @@ const bootBay: Checkpoint[] = [
     id: "boot-calibration-grid",
     sectorId: "boot-bay",
     title: "Calibration Sweep",
-    objective: "Build a line of evenly spaced calibration values, reshape it, and report useful metadata.",
+    objective: "Build and reshape evenly spaced calibration values, then make a stepped course line that excludes route_stop. Create report as a dictionary with the keys shape, ndim, size, and dtype. Use the matching attributes from calibration. The dtype must be the NumPy dtype value itself, not a string.",
     skill: "arange, linspace, reshape, and array metadata",
     setup: py(
       "low, high, sample_count = 0.0, 1.0, 6",
@@ -89,13 +95,15 @@ const bootBay: Checkpoint[] = [
     starter: py(
       "# Use the supplied calibration range and route settings.",
       "calibration = None  # TODO: evenly spaced values in grid_shape",
-      "course_line = None  # TODO: route_start up to route_stop by route_step",
-      "report = None  # TODO: shape, ndim, size, and dtype for calibration",
+      "course_line = None  # TODO: route_start to (but not including) route_stop by route_step",
+      "# TODO: Create report as a dictionary with the keys shape, ndim, size, and dtype.",
+      "# Use the matching attributes from calibration. Keep the NumPy dtype value itself, not a string.",
+      "report = None",
     ),
     hints: [
       "linspace is like marking equal spaces between the two ends of a measuring tape; arange steps by a fixed amount.",
       "For a different example, np.linspace(2, 8, 4).reshape(2, 2) makes a 2 by 2 table from four evenly spaced values.",
-      "Use np.linspace(low, high, sample_count).reshape(grid_shape), np.arange(...) for the route, then read the four attributes from calibration.",
+      "Use linspace and reshape for calibration, and arange for the route. In the report dictionary, match each key (shape, ndim, size, dtype) to the attribute of the same name. Keep the dtype value without converting it to text.",
     ],
     prediction: prediction(
       "A 2 by 4 calibration grid has which ndim and size?",
@@ -107,7 +115,30 @@ const bootBay: Checkpoint[] = [
       check("Calibration grid has the requested shape", "calibration.shape == __initial['grid_shape']", "Reshape the evenly spaced values."),
       check("Calibration values span the supplied endpoints evenly", "bool(np.allclose(calibration.ravel(), np.linspace(__initial['low'], __initial['high'], __initial['sample_count'])))", "linspace includes both endpoints by default."),
       check("Course line follows the supplied step", "bool(np.array_equal(course_line, np.arange(__initial['route_start'], __initial['route_stop'], __initial['route_step'])))", "arange stops before route_stop."),
-      check("Report contains correct shape, ndim, size, and dtype", "report['shape'] == calibration.shape and report['ndim'] == calibration.ndim and report['size'] == calibration.size and report['dtype'] == calibration.dtype", "Read metadata from calibration after you create it."),
+      {
+        label: "Report contains correct shape, ndim, size, and dtype",
+        expr: [
+          calibrationReportIsDict,
+          ...calibrationReportHasKeys,
+          calibrationReportDtype,
+          ...calibrationReportKeys.map(key => `report['${key}'] == calibration.${key}`),
+        ].join(" and "),
+        hint: "Check the report values. Each must match the calibration attribute with the same name.",
+        failureHints: [
+          {
+            expr: `not ${calibrationReportIsDict}`,
+            hint: "Create report as a dictionary with the keys shape, ndim, size, and dtype.",
+          },
+          ...calibrationReportKeys.map((key, index) => ({
+            expr: `not (${calibrationReportHasKeys[index]})`,
+            hint: `The report is missing the '${key}' key. Check its spelling and add its value from calibration.`,
+          })),
+          {
+            expr: `not ${calibrationReportDtype}`,
+            hint: "Use the NumPy dtype value from calibration.dtype. Do not convert it to a string.",
+          },
+        ],
+      },
     ],
   }),
 ];
@@ -153,7 +184,7 @@ export const sectors: Sector[] = [
         id: "sensor-panel-reading",
         sectorId: "sensor-deck",
         title: "Panel Reading",
-        objective: "Select a row, a rectangular window, and several paired coordinates from the sensor panel.",
+        objective: "Read row 0, the window at zero-based rows 1–2 and columns 1–3, and the paired priority coordinates. Leave sensor_grid unchanged.",
         skill: "Integer indexing, slicing, and fancy indexing",
         setup: py(
           "sensor_grid = np.array([[11, 12, 13, 14, 15], [21, 22, 23, 24, 25], [31, 32, 33, 34, 35], [41, 42, 43, 44, 45]])",
@@ -165,7 +196,12 @@ export const sectors: Sector[] = [
           "priority_rows = np.array([1, 4, 3])",
           "priority_cols = np.array([3, 0, 2])",
         ),
-        starter: py("# Read the first row, the center window, and paired priority coordinates.", "first_row = None", "scan_window = None", "priority = None"),
+        starter: py(
+          "# Read from sensor_grid without changing it.",
+          "first_row = None  # Row at index 0",
+          "scan_window = None  # Row indexes 1–2 and column indexes 1–3, inclusive",
+          "priority = None  # Match each priority_rows entry with its priority_cols entry",
+        ),
         hints: [
           "A slice selects a continuous rectangle, while fancy indexing is like calling out separate seat coordinates.",
           "On a 4 by 5 seating chart, grid[1:3, 1:4] selects rows 1 and 2 and columns 1, 2, and 3.",
@@ -213,7 +249,7 @@ export const sectors: Sector[] = [
       id: "nebula-stride-safe-log",
       sectorId: "sensor-deck",
       title: "Stride-Safe Log",
-      objective: "Edit every other sensor row and column through a strided view while archiving the original samples.",
+      objective: "Sample sensor_grid from index 0 along each axis using row_step and col_step. Archive a copy of those samples, then add offset to them through a view.",
       skill: "Strided slicing, views, copies, and snapshots",
       setup: py(
         "original_grid = np.array([[1, 2, 3, 4, 5], [6, 7, 8, 9, 10], [11, 12, 13, 14, 15], [16, 17, 18, 19, 20], [21, 22, 23, 24, 25]])",
@@ -229,7 +265,12 @@ export const sectors: Sector[] = [
         "expected_grid = original_grid.copy()",
         "expected_grid[::row_step, ::col_step] += offset",
       ),
-      starter: py("# Archive the sampled pixels before editing their strided view.", "archive = None", "pixel_view = None", "# TODO: add offset through pixel_view"),
+      starter: py(
+        "# Select samples using the supplied row_step and col_step.",
+        "archive = None  # Independent copy of the sampled cells before editing",
+        "pixel_view = None  # Live view of the same sampled cells",
+        "# TODO: add offset in place through pixel_view",
+      ),
       hints: [
         "A stride is like reading every second seat in a row instead of every seat.",
         "For example, board[::2, ::2] selects alternating rows and alternating columns from a checkerboard.",
@@ -273,7 +314,7 @@ export const sectors: Sector[] = [
         id: "reactor-broadcast-wave",
         sectorId: "reactor-garden",
         title: "Broadcast Bloom",
-        objective: "Broadcast a lane bias across root_heat. Set efficiency to np.exp(-boosted / 10) and log_signal to np.log1p(boosted), then derive wave and danger arrays.",
+        objective: "Take the square root of the heat magnitudes, then take its sine for wave and add bias across columns for boosted. Set efficiency to np.exp(-boosted / 10), log_signal to np.log1p(boosted), and mark boosted values strictly above danger_limit.",
         skill: "Broadcasting, ufunc chains, and comparisons",
         setup: py(
           "heat = np.array([[1.0, -4.0, 9.0], [16.0, -25.0, 36.0]])",
@@ -289,11 +330,11 @@ export const sectors: Sector[] = [
           "# Continue from the supplied heat and bias arrays.",
           "magnitude = None",
           "root_heat = None",
-          "wave = None",
-          "boosted = None",
+          "wave = None  # Sine of root_heat",
+          "boosted = None  # Add one bias per column to root_heat",
           "efficiency = None",
           "log_signal = None",
-          "danger = None",
+          "danger = None  # Boolean mask for boosted values strictly above danger_limit",
         ),
         hints: [
           "A lane bias is like a row of seasoning amounts that gets added to every tray in the kitchen.",
@@ -371,7 +412,7 @@ export const sectors: Sector[] = [
         id: "quarantine-safe-filter",
         sectorId: "quarantine-lab",
         title: "Filter the Bio Samples",
-        objective: "Keep readings above a threshold and summarize whether any breach or out-of-range value remains.",
+        objective: "Fill missing readings with fill_value. Keep readings at or above threshold, flag any negative cleaned reading as a breach, and report whether all cleaned readings are at or below stability_cap.",
         skill: "Boolean filtering, where, any, and all",
         setup: py(
           "samples = np.array([[1.2, np.nan, 3.5], [0.4, -1.2, np.nan], [2.1, 0.0, 4.4]])",
@@ -382,13 +423,12 @@ export const sectors: Sector[] = [
           "fill_value, threshold, stability_cap = 0.0, 2.0, 6.0",
         ),
         starter: py(
-          "# Clean first, then reuse the safe mask for filtering and quarantine.",
-          "clean = None",
-          "safe_mask = None",
-          "filtered = None",
-          "has_breach = None",
-          "all_stable = None",
-          "quarantine = None",
+          "clean = None  # Replace NaNs with fill_value",
+          "safe_mask = None  # Mark cleaned readings at or above threshold",
+          "filtered = None  # 1D array of readings selected by safe_mask",
+          "has_breach = None  # Whether any cleaned reading is negative",
+          "all_stable = None  # Whether every cleaned reading is at or below stability_cap",
+          "quarantine = None  # Keep the grid shape and replace unsafe cells with zeros",
         ),
         hints: [
           "A boolean mask works like a sieve: it keeps only the cells whose condition is true.",
@@ -408,11 +448,15 @@ export const sectors: Sector[] = [
       id: "nebula-robust-lane-score",
       sectorId: "quarantine-lab",
       title: "Robust Lane Score",
-      objective: "Replace missing readings with their lane median, then calculate each lane's range.",
+      objective: "Find one median per column, ignoring NaNs. Use those medians to fill the gaps, then find each filled column's range (maximum minus minimum).",
       skill: "NaN-aware aggregation and axis semantics",
       setup: py("samples = np.array([[1.0, np.nan, 7.0], [3.0, 5.0, np.nan], [9.0, 7.0, 11.0]])"),
       alternate: py("samples = np.array([[np.nan, 2.0], [4.0, 8.0], [10.0, np.nan], [6.0, 4.0]])"),
-      starter: py("# Find one median per lane, fill gaps from it, and measure each lane range.", "lane_median = None", "filled = None", "lane_range = None"),
+      starter: py(
+        "lane_median = None  # 1D array with one NaN-aware median per column",
+        "filled = None  # Replace only the missing readings",
+        "lane_range = None  # Maximum minus minimum in each filled column",
+      ),
       hints: [
         "A median is the middle value after ordering a lane's readings, so one outlier has less pull than it does on the mean.",
         "For columns [1, 3, 9] and [2, 5, 7], np.nanmedian(table, axis=0) gives one typical value per column.",
@@ -457,11 +501,15 @@ export const sectors: Sector[] = [
         id: "cargo-join-split",
         sectorId: "cargo-forge",
         title: "Join and Split Modules",
-        objective: "Join modules by columns, stack them on a new axis, and split a manifest into equal sections.",
+        objective: "Place left and right side by side, then stack them in that order on a new leading axis. Split the manifest into three equal sections in the original order.",
         skill: "concatenate, stack, split, and axis choice",
         setup: py("left = np.array([[1, 2], [3, 4]])", "right = np.array([[5, 6], [7, 8]])", "manifest = np.arange(12)"),
         alternate: py("left = np.array([[10, 11], [12, 13], [14, 15]])", "right = np.array([[20, 21], [22, 23], [24, 25]])", "manifest = np.arange(15, 30)"),
-        starter: py("# Combine the modules and divide the manifest into three sections.", "merged = None", "stacked = None", "sections = None"),
+        starter: py(
+          "merged = None  # Modules side by side, left first",
+          "stacked = None  # Modules on a new leading axis, left first",
+          "sections = None  # Three equal sections in manifest order",
+        ),
         hints: [
           "Concatenate extends an existing direction; stack creates an additional direction.",
           "Two 2 by 2 panels joined across columns make a 2 by 4 panel, while stacking them makes two 2 by 2 layers.",
@@ -502,11 +550,14 @@ export const sectors: Sector[] = [
       id: "nebula-axis-stacking",
       sectorId: "cargo-forge",
       title: "Axis Stacking",
-      objective: "Stack matching module grids between their row and column axes to create a layered cargo tensor.",
+      objective: "Stack the modules on a new axis between rows and columns, then join their rows into one grid. Put module_a before module_b in both outputs.",
       skill: "Stack axis placement and 3D shape",
       setup: py("module_a = np.array([[1, 2, 3], [4, 5, 6]])", "module_b = np.array([[11, 12, 13], [14, 15, 16]])"),
       alternate: py("module_a = np.array([[2, 4], [6, 8], [10, 12]])", "module_b = np.array([[3, 5], [7, 9], [11, 13]])"),
-      starter: py("# Stack the two modules between row and column axes, then join their rows.", "layers = None", "joined_rows = None"),
+      starter: py(
+        "layers = None  # Axes in order: row, module, column",
+        "joined_rows = None  # All rows of module_a, followed by all rows of module_b",
+      ),
       hints: [
         "The axis argument chooses where the new module dimension sits in the finished tensor.",
         "Imagine two photo albums, each with 3 pages and 4 pictures per page: stacking at axis 1 gives (3, 2, 4).",
@@ -528,11 +579,16 @@ export const sectors: Sector[] = [
         id: "drone-seeded-traffic",
         sectorId: "drone-bridge",
         title: "Seeded Traffic",
-        objective: "Generate repeatable traffic and calculate row totals and column averages.",
+        objective: "Use a NumPy Generator with the supplied seed to make repeatable integer traffic, then compute one total per row and one average per column.",
         skill: "Random Generator and axis reductions",
         setup: py("seed, low, high, traffic_shape = 7, 2, 20, (3, 4)"),
         alternate: py("seed, low, high, traffic_shape = 21, -3, 17, (4, 3)"),
-        starter: py("# Build a seeded generator, traffic grid, row totals, and column means.", "rng = None", "traffic = None", "totals = None", "means = None"),
+        starter: py(
+          "rng = None  # NumPy Generator initialized with seed",
+          "traffic = None  # Integers from low up to (but excluding) high, in traffic_shape",
+          "totals = None  # One total per row",
+          "means = None  # One average per column",
+        ),
         hints: [
           "A seeded Generator is like a route replay button: the same seed repeats the same traffic.",
           "For a 3 by 4 grid, sum(axis=1) gives three row totals and mean(axis=0) gives four column means.",
@@ -550,11 +606,17 @@ export const sectors: Sector[] = [
         id: "drone-sort-codes",
         sectorId: "drone-bridge",
         title: "Sort Flight Codes",
-        objective: "Find extreme reading positions, sort each row, order the first row, and deduplicate flight codes.",
+        objective: "Find the first global minimum and maximum positions in flattened row order. Sort each row, report the positions that sort the first row, and return the distinct flight codes in sorted order.",
         skill: "argmin, argmax, sort, argsort, and unique",
         setup: py("readings = np.array([[8, 2, 9, 2], [5, 7, 1, 6]])", "codes = np.array([5, 2, 5, 9, 2, 11])"),
         alternate: py("readings = np.array([[14, 12, 18], [10, 19, 11], [13, 15, 16]])", "codes = np.array([4, 4, 3, 8, 3, 12, 8])"),
-        starter: py("# Make position, sorted-row, first-row order, and unique-code reports.", "minimum_index = None", "maximum_index = None", "sorted_rows = None", "first_row_order = None", "unique_codes = None"),
+        starter: py(
+          "minimum_index = None  # First global minimum index in flattened row order",
+          "maximum_index = None  # First global maximum index in flattened row order",
+          "sorted_rows = None  # Sort values within each row",
+          "first_row_order = None  # Indexes that sort the first row",
+          "unique_codes = None  # Sorted distinct codes",
+        ),
         hints: [
           "argmin and argmax report positions, while min and max report values.",
           "For row [9, 2, 5], argsort returns positions [1, 2, 0], which would put that row in order.",
@@ -595,14 +657,14 @@ export const sectors: Sector[] = [
       guardDivision: true,
       sectorId: "drone-bridge",
       title: "Zero-Safe Traffic Shares",
-      objective: "Convert each row into proportions without dividing by zero in an empty traffic lane.",
+      objective: "Divide each count by its row total. Keep row_totals as a 2D column with one total per row. Return zeros for any row with a zero total and avoid dividing by zero.",
       skill: "keepdims and guarded vectorized division",
       setup: py("counts = np.array([[2.0, 3.0, 5.0], [0.0, 0.0, 0.0], [4.0, 1.0, 5.0]])"),
       alternate: py("counts = np.array([[8.0, 2.0], [0.0, 0.0], [1.0, 3.0], [5.0, 5.0]])"),
-      starter: py("# Keep row totals two-dimensional, then divide only where a row has traffic.", "row_totals = None", "shares = None"),
+      starter: py("row_totals = None  # Shape (number of rows, 1)", "shares = None  # Same shape as counts; rows with zero totals stay all zero"),
       hints: [
         "Normalize each row by its own total, but let an empty row stay all zeros.",
-        "Keep a 1D list of row totals expanded as a column so it can divide a 2D traffic grid row by row.",
+        "Give the row totals a length-one column axis so they broadcast across every column of the traffic grid.",
         "Use counts.sum(axis=1, keepdims=True) and np.divide with where=row_totals != 0 plus a zero-filled output.",
       ],
       prediction: prediction("If counts has shape (4, 2), what shape does sum(axis=1, keepdims=True) have?", ["(4, 1)", "(1, 2)", "(4,)"], 0, "The reduced column axis remains as length one for row-wise broadcasting."),
@@ -626,7 +688,7 @@ export const sectors: Sector[] = [
         id: "colony-rescue-sequence",
         sectorId: "colony-core",
         title: "Final Rescue Sequence",
-        objective: "Create a grid, keep even cells, broadcast repairs, reduce by row, reshape, and multiply by weights.",
+        objective: "Build a grid of consecutive integers, replace odd values with zeros, and apply the column repair bias. Report row totals and reshape the boosted grid to half as many rows. Multiply that matrix by weights and average the course values for the rescue score.",
         skill: "Capstone: creation, masks, broadcasting, reductions, and matrix math",
         setup: py(
           "first_value, grid_shape = 1, (4, 4)",
@@ -639,17 +701,16 @@ export const sectors: Sector[] = [
           "weights = np.array([[1.0, 0.0, 0.5], [0.5, 1.0, 0.0], [0.0, 0.5, 1.0], [1.0, 1.0, 0.0], [0.2, 0.8, 0.4], [0.4, 0.2, 0.8], [0.8, 0.4, 0.2], [1.0, 0.0, 1.0]])",
         ),
         starter: py(
-          "# Build each stage from the previous NumPy result.",
-          "grid = None",
-          "safe = None",
-          "boosted = None",
-          "row_power = None",
-          "matrix = None",
-          "course = None",
-          "rescue_score = None",
+          "grid = None  # Consecutive integers starting at first_value in grid_shape",
+          "safe = None  # Keep even values in place and replace odd values with zeros",
+          "boosted = None  # Add repair_bias across the columns of safe",
+          "row_power = None  # One sum per row of boosted",
+          "matrix = None  # Reshape boosted to half as many rows, keeping every value",
+          "course = None  # Matrix product of matrix and weights",
+          "rescue_score = None  # Mean of all values in course",
         ),
         hints: [
-          "Treat the rescue as a pipeline: each named output should come from the array just before it.",
+          "Both row_power and matrix start from boosted. The totals summarize the grid, while the reshape keeps every value for the course calculation.",
           "For a separate 2 by 2 energy grid, first use a boolean condition to zero unwanted cells, then add one value per column.",
           "Create the integer range and reshape it, use np.where for even cells, add repair_bias, sum axis 1, reshape to half as many rows, multiply by weights, and average.",
         ],

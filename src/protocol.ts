@@ -8,6 +8,13 @@ export type OutputInfo = {
   size?: number;
 };
 
+export type CheckDefinition = {
+  label: string;
+  expr: string;
+  hint: string;
+  failureHints?: {expr: string; hint: string}[];
+};
+
 export type RunInput = {
   runId: number;
   checkpointId: string;
@@ -16,7 +23,7 @@ export type RunInput = {
   setup: string;
   alternate?: string;
   guardDivision?: boolean;
-  checks: {label: string; expr: string; hint: string}[];
+  checks: CheckDefinition[];
 };
 
 export type PythonError = {name: string; message: string; line: number | null; traceback: string};

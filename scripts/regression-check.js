@@ -27,6 +27,19 @@ const nearMisses = {
     'shares = np.where(row_totals != 0, 1.0 / counts.shape[1], 0.0) * np.ones_like(counts)',
   ].join('\n'),
 };
+const clarifiedObjectives = {
+  'sensor-panel-reading': /zero-based rows 1–2 and columns 1–3.*Leave sensor_grid unchanged/,
+  'nebula-stride-safe-log': /using row_step and col_step.*Archive a copy.*add offset/,
+  'reactor-broadcast-wave': /sine for wave.*bias across columns.*strictly above danger_limit/,
+  'quarantine-safe-filter': /at or above threshold.*negative cleaned reading.*at or below stability_cap/,
+  'nebula-robust-lane-score': /one median per column, ignoring NaNs.*maximum minus minimum/,
+  'cargo-join-split': /new leading axis.*three equal sections in the original order/,
+  'nebula-axis-stacking': /between rows and columns.*join their rows.*module_a before module_b/,
+  'drone-seeded-traffic': /NumPy Generator with the supplied seed.*integer traffic/,
+  'drone-sort-codes': /first global minimum and maximum positions in flattened row order.*distinct flight codes in sorted order/,
+  'nebula-zero-safe-shares': /2D column with one total per row.*zeros for any row with a zero total/,
+  'colony-rescue-sequence': /reshape the boosted grid to half as many rows.*average the course values/,
+};
 assert.deepEqual(sectors.map(sector => sector.campaign.length), [2, 2, 2, 2, 3, 3, 1]);
 assert.equal(labDatasets.length, 4);
 assert.equal(new Set(catalog.map(entry => entry.id)).size, 22);
@@ -84,6 +97,9 @@ async function inspect(page, name) {
 async function clear(page, checkpoint) {
   const before = await getState(page);
   assert.equal(before.checkpoint.id, checkpoint.id);
+  if (Object.hasOwn(clarifiedObjectives, checkpoint.id)) {
+    assert.match(await page.locator('#mission-objective').innerText(), clarifiedObjectives[checkpoint.id], checkpoint.id);
+  }
   if (checkpoint.id === 'reactor-broadcast-wave') {
     assert.match(await page.locator('#mission-objective').innerText(), /np\.exp\(-boosted \/ 10\)/);
     const wrongScale = await run(page, solutions[checkpoint.id].replace('np.exp(-boosted / 10)', 'np.exp(-boosted)'));
@@ -138,6 +154,62 @@ async function clear(page, checkpoint) {
   assert.ok(after.checkpoint.complete, checkpoint.id + ': no clear recorded');
   assert.equal(after.progress.checksPassing, after.progress.totalChecks, checkpoint.id);
   return after;
+}
+
+async function checkCalibrationReport(page) {
+  const checkpoint = campaign[1];
+  const instructions = /Create report as a dictionary with the keys shape, ndim, size, and dtype\..*Use the matching attributes from calibration/s;
+  for (const text of [await page.locator('#mission-objective').innerText(), await draftText(page)]) {
+    assert.match(text, instructions);
+    assert.match(text, /NumPy dtype value itself, not a string/);
+  }
+  await page.locator('#hint-details summary').click();
+  for (const _ of checkpoint.hints) await page.locator('#hint-btn').click();
+  const hint = await page.locator('#hints li').last().innerText();
+  assert.match(hint, /report dictionary.*shape, ndim, size, dtype.*attribute of the same name/);
+  assert.match(hint, /without converting it to text/);
+  await page.locator('#hint-details summary').click();
+
+  const solution = solutions[checkpoint.id];
+  const arrays = solution.slice(0, solution.indexOf('\nreport = '));
+  const cases = [
+    {
+      source: arrays + '\nreport = (calibration.shape, calibration.ndim, calibration.size, calibration.dtype)',
+      message: /Create report as a dictionary/,
+    },
+    {
+      source: solution.replace("'ndim':", "'ndmi':"),
+      message: /missing the 'ndim' key/,
+    },
+    {
+      source: solution + "\nreport['size'] += 1",
+      message: /Check the report values/,
+    },
+    {
+      source: solution + "\nreport['dtype'] = str(calibration.dtype)",
+      message: /use the NumPy dtype value from calibration\.dtype/i,
+    },
+    {
+      source: solution + "\nif calibration.size != 6:\n    del report['ndim']",
+      message: /missing the 'ndim' key/,
+      alternate: true,
+    },
+  ];
+  for (const {source, message, alternate = false} of cases) {
+    const result = await run(page, source);
+    assert.equal(result.runStatus, 'stale');
+    assert.equal(result.checkpoint.complete, false);
+    assert.equal(result.progress.labUnlocked, false);
+    assert.equal(result.progress.checksPassing, 3);
+    assert.equal(result.progress.totalChecks, 4);
+    assert.match(result.output.summary, message);
+    const review = page.locator('#validation-list li').last();
+    assert.match(await review.innerText(), /Review.*Report contains correct shape/s);
+    const feedback = await review.locator('p').innerText();
+    assert.match(feedback, message);
+    assert.equal(result.output.summary.includes('The visible sample passed.'), alternate);
+    assert.equal(feedback.includes('The visible sample passed.'), alternate);
+  }
 }
 
 async function next(page) {
@@ -399,7 +471,9 @@ async function play(name) {
     assert.match(await draftText(page), /saved edit/);
     await next(page);
     assert.match(await page.locator('#setup-details summary').innerText(), /low, high, sample_count/);
+    await checkCalibrationReport(page);
     await clear(page, campaign[1]);
+    assert.equal((await getState(page)).progress.labUnlocked, true);
     const peerDraft = '# edited from a second tab opened before the clear';
     await editor(peer).fill(peerDraft);
     await peer.waitForFunction(draft => {

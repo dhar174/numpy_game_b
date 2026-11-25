@@ -116,12 +116,28 @@ def compile_traffic_case(source, scope):
     return compile(ast.fix_missing_locations(tree), "<mission>", "exec")
 
 
+def check_matches(expr, scope):
+    try:
+        return bool(eval(expr, scope))
+    except Exception:
+        return False
+
+
+def evaluate_check(check, scope):
+    passed = check_matches(check["expr"], scope)
+    if not passed:
+        for rule in check.get("failureHints", []):
+            if check_matches(rule["expr"], scope):
+                return False, rule["hint"]
+    return passed, check["hint"]
+
+
 def run_case(setup, source, checks, guard_division=False):
     scope = {"np": np, "__name__": "__main__"}
     stdout = BoundedStream()
     stderr = BoundedStream()
     error = None
-    passed = []
+    results = []
     with (warnings.catch_warnings(), np.printoptions(),
           contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
         try:
@@ -134,12 +150,8 @@ def run_case(setup, source, checks, guard_division=False):
         except BaseException as exc:
             error = describe_error(exc)
         if error is None:
-            for check in checks:
-                try:
-                    passed.append(bool(eval(check["expr"], scope)))
-                except Exception:
-                    passed.append(False)
-    return scope, stdout, stderr, error, passed
+            results = [evaluate_check(check, scope) for check in checks]
+    return scope, stdout, stderr, error, results
 
 
 def bounded_label(text, limit):
@@ -166,14 +178,15 @@ def run_request(raw):
     _visible = dict(reversed(list(islice(visible, MAX_OUTPUTS))))
     second_error = None
     second = first
-    if not error and payload.get("alternate") is not None and all(first):
+    if not error and payload.get("alternate") is not None and all(passed for passed, _ in first):
         _, _, _, second_error, second = run_case(
             payload["alternate"], payload["source"], checks, payload.get("guardDivision", False))
-    report = [] if error else [
-        {"label": check["label"], "hint": check["hint"],
-         "samplePassed": first[i], "passed": first[i] and i < len(second) and second[i]}
-        for i, check in enumerate(checks)
-    ]
+    report = []
+    for i, (sample_passed, sample_hint) in enumerate(first):
+        check = checks[i]
+        alternate_passed, alternate_hint = second[i] if i < len(second) else (False, check["hint"])
+        report.append({"label": check["label"], "hint": alternate_hint if sample_passed else sample_hint,
+                       "samplePassed": sample_passed, "passed": sample_passed and alternate_passed})
     return json.dumps({
         "stdout": stdout.text(), "stderr": stderr.text(),
         "stdoutTruncated": stdout.truncated, "stderrTruncated": stderr.truncated,
